@@ -118,6 +118,27 @@ header{display:flex;align-items:center;justify-content:space-between;padding:2px
 }
 .theme-btn:hover{background:var(--hover);color:var(--text);border-color:var(--border-strong)}
 
+/* ── Upstream (NVIDIA) health badge ──────────── */
+.upstream-badge{display:inline-flex;align-items:center;gap:6px;cursor:help}
+.up-dot{width:7px;height:7px;border-radius:50%;background:var(--text3);flex:none}
+.upstream-badge.up-ok{color:var(--green);border-color:color-mix(in srgb,var(--green) 40%,var(--border))}
+.upstream-badge.up-ok .up-dot{background:var(--green);box-shadow:0 0 6px color-mix(in srgb,var(--green) 70%,transparent)}
+.upstream-badge.up-slow{color:var(--amber);border-color:color-mix(in srgb,var(--amber) 40%,var(--border))}
+.upstream-badge.up-slow .up-dot{background:var(--amber);box-shadow:0 0 6px color-mix(in srgb,var(--amber) 70%,transparent)}
+.upstream-badge.up-down{color:var(--red);border-color:color-mix(in srgb,var(--red) 40%,var(--border))}
+.upstream-badge.up-down .up-dot{background:var(--red);box-shadow:0 0 6px color-mix(in srgb,var(--red) 70%,transparent)}
+.upstream-badge.up-down .pulse{animation:pulseRed 1.6s ease-in-out infinite}
+@keyframes pulseRed{0%,100%{opacity:1}50%{opacity:.35}}
+.upstream-detail{font-size:.62rem;color:var(--text2);margin-left:2px}
+
+/* ── Model health badge (in the model list) ──── */
+.health-badge{
+  font-family:var(--mono);font-size:.55rem;font-weight:700;letter-spacing:.04em;
+  padding:1px 6px;border-radius:100px;margin-left:6px;flex:none;text-transform:uppercase
+}
+.health-badge.health-bad{color:#fff;background:var(--red)}
+.health-badge.health-slow{color:#1a1a1a;background:var(--amber)}
+
 /* ── Bento Grid ──────────────────────────────── */
 .bento{
   display:grid;

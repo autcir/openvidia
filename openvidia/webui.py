@@ -97,6 +97,7 @@ def attach_webui(app: FastAPI, state: ProxyState, web_dir: Path) -> None:
             "port": state.port,
             "keys": len(state.keys),
             "cooldowns": on_cooldown,
+            "upstream": dict(state.upstream),
         }
 
     @app.get("/api/stats")

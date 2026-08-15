@@ -382,6 +382,7 @@ class ProxyState:
         self.active_model: str | None = None
         self.running: bool = True
         self.health_task: asyncio.Task | None = None
+        self.upstream_task: asyncio.Task | None = None
 
         self.cooldowns: dict[str, KeyCooldown] = {}
         self.rpm: dict[str, RpmTracker] = {}
@@ -393,6 +394,16 @@ class ProxyState:
         self.model_health: dict[str, ModelHealth] = {}
         # Per-(key, model) health, learned from real traffic (KeyModelHealth).
         self.key_model_health: dict[tuple[str, str], KeyModelHealth] = {}
+        # Upstream (NVIDIA) reachability, probed periodically so the dashboard
+        # can tell "NVIDIA is down" apart from "the proxy broke". status is one
+        # of "ok" / "slow" / "down" / "unknown"; latency_ms is the last probe's
+        # time to response; detail carries the human reason when not ok.
+        self.upstream: dict[str, object] = {
+            "status": "unknown",
+            "latency_ms": 0,
+            "last_check": 0.0,
+            "detail": "",
+        }
         # Optional cross-node synchronisation (Redis). None = single-node.
         self.redis_sync = redis_sync
 
@@ -410,6 +421,20 @@ class ProxyState:
     @property
     def keys(self) -> list[str]:
         return self._keys
+
+    def set_upstream_status(
+        self,
+        status: str,
+        latency_ms: float = 0.0,
+        detail: str = "",
+    ) -> None:
+        """Record the latest upstream (NVIDIA) probe result."""
+        self.upstream = {
+            "status": status,
+            "latency_ms": round(latency_ms, 1),
+            "last_check": time.time(),
+            "detail": detail,
+        }
 
     @keys.setter
     def keys(self, new_keys: list[str]) -> None:

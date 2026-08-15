@@ -171,6 +171,63 @@ async def _background_health_check(state: ProxyState, client: httpx.AsyncClient)
         pass
 
 
+# ── Upstream (NVIDIA) probe ────────────────────────────────────────────
+# The dashboard needs one unambiguous signal that answers "is it us or is it
+# NVIDIA?" A cheap GET /v1/models on one healthy key — short timeout, no RPM
+# budget spent on chat — is enough to tell the two apart. Results land in
+# state.upstream so /api/status and the web UI can render them.
+
+_UPSTREAM_PROBE_INTERVAL = 30.0
+_UPSTREAM_PROBE_TIMEOUT = 8.0
+_UPSTREAM_SLOW_MS = 1500.0
+
+
+async def _probe_upstream(state: ProxyState, client: httpx.AsyncClient) -> None:
+    """One reachability probe of the NVIDIA endpoint."""
+    keys = [k for k in state.keys if state.is_key_healthy(k) and state.key_can_send_rpm(k)]
+    if not keys:
+        state.set_upstream_status("unknown", 0.0, "no healthy key to probe with")
+        return
+    key = keys[0]
+    headers = {"Authorization": f"Bearer {key}", "User-Agent": "openvidia/2.0"}
+    t0 = time.monotonic()
+    try:
+        resp = await client.request(
+            "GET",
+            UPSTREAM_BASE + "models",
+            headers=headers,
+            timeout=httpx.Timeout(_UPSTREAM_PROBE_TIMEOUT),
+        )
+        await resp.aclose()
+        latency = (time.monotonic() - t0) * 1000
+        if resp.is_success:
+            status = "slow" if latency > _UPSTREAM_SLOW_MS else "ok"
+            detail = "" if status == "ok" else f"responded in {latency:.0f}ms"
+            state.set_upstream_status(status, latency, detail)
+        else:
+            state.set_upstream_status(
+                "down",
+                latency,
+                f"upstream answered {resp.status_code}",
+            )
+    except httpx.TimeoutException:
+        state.set_upstream_status(
+            "down", (time.monotonic() - t0) * 1000, "upstream did not answer within 8s"
+        )
+    except httpx.HTTPError as e:
+        state.set_upstream_status("down", (time.monotonic() - t0) * 1000, f"network error: {e}")
+
+
+async def _background_upstream_probe(state: ProxyState, client: httpx.AsyncClient) -> None:
+    """Every 30s, measure whether NVIDIA itself is reachable."""
+    try:
+        while True:
+            await _probe_upstream(state, client)
+            await asyncio.sleep(_UPSTREAM_PROBE_INTERVAL)
+    except asyncio.CancelledError:
+        pass
+
+
 class BodyLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         cl = request.headers.get("content-length")
@@ -279,12 +336,15 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
 
         asyncio.create_task(_pre_warm())
         state.health_task = asyncio.create_task(_background_health_check(state, client))
+        state.upstream_task = asyncio.create_task(_background_upstream_probe(state, client))
         if rs is not None:
             rs.on_remote = state.apply_remote_event
             await rs.start()
         yield
         if state.health_task is not None:
             state.health_task.cancel()
+        if state.upstream_task is not None:
+            state.upstream_task.cancel()
         if rs is not None:
             await rs.close()
         await client.aclose()
@@ -366,6 +426,15 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
                                 m["slug"] = m.get("id", "")
                                 m["display_name"] = m.get("id", "")
                             data["models"] = models
+                        # Arricchisci ogni modello con la salute appresa dal
+                        # traffico reale (ModelHealth): la dashboard la usa per
+                        # marcare i modelli con circuito aperto o latenza alta
+                        # senza dover fare un secondo giro di API.
+                        for m in list(data.get("data") or []) + list(data.get("models") or []):
+                            mid = m.get("id", "")
+                            h = state.model_health.get(mid)
+                            if h is not None:
+                                m["health"] = h.as_dict()
                         # Inietta l'alias "openvidia" in cima a entrambe le liste
                         # così i picker dei CLI (Codex, opencode) lo mostrano come
                         # opzione selezionabile. Il proxy lo risolve a runtime nel

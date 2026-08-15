@@ -95,6 +95,29 @@ document.querySelectorAll('[data-toggle]').forEach(hd => {
 })
 
 /* ── Running State ──────────────────────────── */
+function renderUpstream(up) {
+  const badge = $('hUpstream')
+  const dot = $('upDot')
+  const txt = $('upText')
+  if (!badge) return
+  const st = (up && up.status) || 'unknown'
+  const ms = up && up.latency_ms
+  badge.className = `header-stat upstream-badge up-${st}`
+  if (st === 'ok') {
+    txt.textContent = ms != null ? `${Math.round(ms)}ms` : 'ok'
+    badge.title = 'NVIDIA reachable'
+  } else if (st === 'slow') {
+    txt.textContent = ms != null ? `slow ${Math.round(ms)}ms` : 'slow'
+    badge.title = `NVIDIA is slow (${(up && up.detail) || 'high latency'}) — not your keys`
+  } else if (st === 'down') {
+    txt.textContent = 'down'
+    badge.title = `NVIDIA is DOWN (${(up && up.detail) || 'no response'}) — your proxy and keys are fine`
+  } else {
+    txt.textContent = '…'
+    badge.title = 'NVIDIA health not measured yet'
+  }
+}
+
 async function updateRunningState() {
   try {
     const st = await api('GET', '/api/status')
@@ -104,6 +127,7 @@ async function updateRunningState() {
     $('stopBtn').style.display = running ? '' : 'none'
     $('startBtn').style.display = running ? 'none' : ''
     $('hKeyCount').textContent = `${st.keys || 0} keys`
+    renderUpstream(st.upstream)
   } catch (_) {
     $('statusText').textContent = 'Offline'
     $('statusDot').querySelector('.pulse-dot').className = 'pulse-dot'
@@ -308,11 +332,14 @@ function renderFilters() {
 async function fetchModels() {
   try {
     const r = await fetch('/v1/models'); const d = await r.json()
-    allModels = (d.data || d.models || []).map(m => ({ id: m.id, owned_by: m.owned_by || '' }))
+    allModels = (d.data || d.models || []).map(m => ({ id: m.id, owned_by: m.owned_by || '', health: m.health || null }))
     $('modelCount').textContent = allModels.length
     renderFilters(); renderModelList(); renderUsage()
   } catch (_) { $('modelList').innerHTML = '<div class="browser-empty">Failed to load</div>' }
 }
+// Refresco il catalogo ogni 60s: NVIDIA toglie/rinomina modelli senza preavviso,
+// e la lista deve seguire senza dover ricaricare la pagina.
+setInterval(fetchModels, 60000)
 
 async function testModel(id, btn) {
   btn.className = 'browser-test testing'; btn.textContent = '…'
@@ -341,10 +368,26 @@ function renderModelList() {
   f.forEach(m => {
     const item = document.createElement('div')
     item.className = `browser-item ${m.id === activeModel ? 'active' : ''}`
-    // m.id / m.owned_by come straight from the upstream /v1/models response.
-    // Remote data never becomes markup.
+    // m.id / m.owned_by / m.health come straight from the upstream /v1/models
+    // response (arricchita dal proxy con ModelHealth). Remote data never
+    // becomes markup.
     const nm = document.createElement('span'); nm.className = 'browser-name'; nm.textContent = m.id
     item.appendChild(nm)
+    // Badge di salute: circuito aperto (modello giù) o failure rate alto
+    // (modello degradato) → il problema è NVIDIA, non le key.
+    if (m.health) {
+      const h = m.health
+      let cls = '', label = ''
+      if (h.circuit_open) { cls = 'health-bad'; label = 'down' }
+      else if (h.failure_rate >= 0.5 && h.requests >= 4) { cls = 'health-bad'; label = 'failing' }
+      else if (h.median_ttft > 5000 && h.requests >= 4) { cls = 'health-slow'; label = `slow ${Math.round(h.median_ttft / 1000)}s` }
+      if (cls) {
+        const hb = document.createElement('span')
+        hb.className = `health-badge ${cls}`; hb.textContent = label
+        hb.title = `${h.requests} req · ${Math.round(h.failure_rate * 100)}% fail · median ttft ${Math.round(h.median_ttft)}ms — upstream NVIDIA, not your keys`
+        item.appendChild(hb)
+      }
+    }
     if (m.owned_by) {
       const ow = document.createElement('span'); ow.className = 'browser-owner'; ow.textContent = m.owned_by
       item.appendChild(ow)
