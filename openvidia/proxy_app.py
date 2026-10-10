@@ -313,7 +313,7 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
     limits = httpx.Limits(max_keepalive_connections=100, max_connections=200, keepalive_expiry=30.0)
     proxy_url = config.outbound_proxy()
     client = httpx.AsyncClient(
-        http2=True,
+        http2=config.upstream_http2(),
         proxy=proxy_url if proxy_url else None,
         limits=limits,
         timeout=httpx.Timeout(**config.httpx_timeout_kwargs()),
