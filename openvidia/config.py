@@ -77,6 +77,17 @@ UPSTREAM_BASE = "https://integrate.api.nvidia.com/v1/"
 UPSTREAM_CHAT = UPSTREAM_BASE + "chat/completions"
 
 
+def upstream_http2() -> bool:
+    """Whether upstream requests share one multiplexed HTTP/2 connection.
+
+    With HTTP/2 a single GOAWAY from the upstream (``ConnectionTerminated``)
+    kills every in-flight stream at once, and a client mid-stream sees a
+    broken event. ``OPENVIDIA_HTTP2=0`` gives each request its own HTTP/1.1
+    connection, so a closed connection costs one stream, not all of them.
+    """
+    return os.environ.get("OPENVIDIA_HTTP2", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
 def outbound_proxy() -> str | None:
     """Return outbound HTTP/SOCKS5 proxy URL for upstream requests.
 
