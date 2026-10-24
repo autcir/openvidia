@@ -319,8 +319,6 @@ dependencies = [
     { name = "fastapi" },
     { name = "httpx", extra = ["http2"] },
     { name = "psutil" },
-    { name = "pycairo", marker = "sys_platform == 'linux'" },
-    { name = "pygobject", marker = "sys_platform == 'linux'" },
     { name = "pyqt6", marker = "sys_platform == 'linux'" },
     { name = "pyqt6-webengine", marker = "sys_platform == 'linux'" },
     { name = "pywebview" },
@@ -347,8 +345,6 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", extras = ["http2"], specifier = ">=0.27" },
     { name = "psutil", specifier = ">=6.0" },
-    { name = "pycairo", marker = "sys_platform == 'linux'", specifier = ">=1.20" },
-    { name = "pygobject", marker = "sys_platform == 'linux'", specifier = ">=3.42" },
     { name = "pyqt6", marker = "sys_platform == 'linux'", specifier = ">=6.5" },
     { name = "pyqt6-webengine", marker = "sys_platform == 'linux'", specifier = ">=6.5" },
     { name = "pywebview", specifier = ">=5.0" },
@@ -443,12 +439,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/b4/90/e2159492b5426be0c1fef7acba807a03511f97c5f86b3caeda6ad92351a7/psutil-7.2.2-cp37-abi3-win_amd64.whl", hash = "sha256:eb7e81434c8d223ec4a219b5fc1c47d0417b12be7ea866e24fb5ad6e84b3d988", size = 137737, upload-time = "2026-01-28T18:15:33.849Z" },
     { url = "https://files.pythonhosted.org/packages/8c/c7/7bb2e321574b10df20cbde462a94e2b71d05f9bbda251ef27d104668306a/psutil-7.2.2-cp37-abi3-win_arm64.whl", hash = "sha256:8c233660f575a5a89e6d4cb65d9f938126312bca76d8fe087b947b3a1aaac9ee", size = 134617, upload-time = "2026-01-28T18:15:36.514Z" },
 ]
-
-[[package]]
-name = "pycairo"
-version = "1.29.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/22/d9/1728840a22a4ef8a8f479b9156aa2943cd98c3907accd3849fb0d5f82bfd/pycairo-1.29.0.tar.gz", hash = "sha256:f3f7fde97325cae80224c09f12564ef58d0d0f655da0e3b040f5807bd5bd3142", size = 665871, upload-time = "2025-11-11T19:13:01.584Z" }
 
 [[package]]
 name = "pycparser"
@@ -557,15 +547,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/c3/b2/bc9c9196916376152
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f4/7e/a72dd26f3b0f4f2bf1dd8923c85f7ceb43172af56d63c7383eb62b332364/pygments-2.20.0-py3-none-any.whl", hash = "sha256:81a9e26dd42fd28a23a2d169d86d7ac03b46e2f8b59ed4698fb4785f946d0176", size = 1231151, upload-time = "2026-03-29T13:29:30.038Z" },
 ]
-
-[[package]]
-name = "pygobject"
-version = "3.56.3"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pycairo" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/da/61/978c5fbca34f10a90df362502fbb5a005637909e7b5a0e9212349ea9d010/pygobject-3.56.3.tar.gz", hash = "sha256:12760e4a0e3d04b6eb95e06f7a27e362c826d567ea613373a92c003b6c70d2d6", size = 1411853, upload-time = "2026-05-08T20:46:39.904Z" }
 
 [[package]]
 name = "pyobjc-core"

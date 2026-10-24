@@ -56,7 +56,7 @@ def default_model(state: ProxyState | None = None) -> str:
 
 
 def _key_model_score(state: ProxyState, key: str) -> float | None:
-    """Media degli score per-modello osservati per questa chiave."""
+    """Mean of the per-model scores observed for this key."""
     scores = [h.score() for (k, _model), h in state.key_model_health.items() if k == key]
     if not scores:
         return None
@@ -404,8 +404,8 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
         if not keys:
             return JSONResponse({"error": "no keys"}, status_code=503)
 
-        # Gli endpoint alternativi sono fallback: si prova in ordine fino al
-        # primo che risponde con la lista modelli.
+        # The alternative endpoints are fallbacks: try them in order until the
+        # first one answers with the model list.
         for endpoint in router.healthy_endpoints():
             for key in keys:
                 if not state.is_key_healthy(key) or not state.key_can_send_rpm(key):
@@ -418,27 +418,27 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
                         router.mark_success(endpoint + "models")
                         data = resp.json()
                         await resp.aclose()
-                        # Mantieni entrambe le chiavi: "data" (standard OpenAI,
-                        # usata da Codex) e "models" (usata da altri client).
+                        # Keep both keys: "data" (OpenAI standard, used by
+                        # Codex) and "models" (used by other clients).
                         if "data" in data and "models" not in data:
                             models = list(data["data"])
                             for m in models:
                                 m["slug"] = m.get("id", "")
                                 m["display_name"] = m.get("id", "")
                             data["models"] = models
-                        # Arricchisci ogni modello con la salute appresa dal
-                        # traffico reale (ModelHealth): la dashboard la usa per
-                        # marcare i modelli con circuito aperto o latenza alta
-                        # senza dover fare un secondo giro di API.
+                        # Enrich each model with the health learned from real
+                        # traffic (ModelHealth): the dashboard uses it to flag
+                        # models with an open circuit or high latency without
+                        # needing a second round of API calls.
                         for m in list(data.get("data") or []) + list(data.get("models") or []):
                             mid = m.get("id", "")
                             h = state.model_health.get(mid)
                             if h is not None:
                                 m["health"] = h.as_dict()
-                        # Inietta l'alias "openvidia" in cima a entrambe le liste
-                        # così i picker dei CLI (Codex, opencode) lo mostrano come
-                        # opzione selezionabile. Il proxy lo risolve a runtime nel
-                        # modello selezionato nella dashboard.
+                        # Inject the "openvidia" alias at the top of both lists
+                        # so the CLI pickers (Codex, opencode) show it as a
+                        # selectable option. The proxy resolves it at runtime to
+                        # the model selected in the dashboard.
                         alias = {
                             "id": "openvidia",
                             "object": "model",
@@ -565,9 +565,9 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
                 body = json.dumps(payload).encode()
 
         # ── Embedding cache (deterministic, RPM-heavy) ────────────────
-        # I vettori sono deterministici per (modello, input): la cache evita
-        # di bruciare il budget RPM del free tier su richieste identiche
-        # ripetute (i client li ricalcolano a ogni restart).
+        # Vectors are deterministic per (model, input): the cache avoids
+        # burning the free-tier RPM budget on repeated identical requests
+        # (clients recompute them on every restart).
         is_embeddings = (
             isinstance(payload, dict)
             and isinstance(payload.get("input"), (str, list))
@@ -658,12 +658,12 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
                 h["Content-Type"] = "application/json"
             return h
 
-        # Multi-endpoint failover: si prova il primo endpoint sano; su 5xx o
-        # timeout l'host è probabilmente in down parziale, si blacklista per
-        # ENDPOINT_RETRY_AFTER e si passa al successivo. Un errore
-        # deterministico (400/401/404) non si ripete diversamente su un altro
-        # host: ci si ferma subito. Un "exhausted" (budget esaurito) NON è un
-        # down dell'host: si prova il prossimo senza blacklist.
+        # Multi-endpoint failover: try the first healthy endpoint; on a 5xx or
+        # a timeout the host is probably partially down, so blacklist it for
+        # ENDPOINT_RETRY_AFTER and move on to the next one. A deterministic
+        # error (400/401/404) will not turn out differently on another host:
+        # stop right away. An "exhausted" (budget spent) is NOT the host being
+        # down: try the next one without blacklisting.
         resp = None
         used_key = ""
         used_idx = -1
@@ -780,8 +780,8 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
             )
 
         # ── Provider free-tier fallback (opt-in via providers.json) ──
-        # Non tocca le chiavi NVIDIA (niente record_key_usage: il successo
-        # non è merito del pool), ma conta come richiesta servita.
+        # Does not touch the NVIDIA keys (no record_key_usage: the success
+        # is not the pool's doing), but it counts as a served request.
         if isinstance(payload, dict) and full_path.endswith("chat/completions"):
             for provider in load_provider_configs():
                 fallback_resp = await try_fallback(client, payload, provider)

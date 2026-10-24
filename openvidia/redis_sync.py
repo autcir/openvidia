@@ -14,7 +14,7 @@ import uuid
 
 try:
     import redis.asyncio as aioredis
-except ImportError:  # redis extra non installato
+except ImportError:  # redis extra not installed
     aioredis = None
 
 _CHANNEL = "openvidia:events"
@@ -71,8 +71,8 @@ class RedisSync:
                 except (TypeError, ValueError, KeyError):
                     continue
                 if event.get("node_id") == self.node_id:
-                    # Il proprio messaggio arriva indietro dal canale: non va
-                    # riapplicato (loop infinito altrimenti).
+                    # Our own message comes back from the channel: it must not be
+                    # re-applied (infinite loop otherwise).
                     continue
                 callback = self.on_remote
                 if callback is not None:

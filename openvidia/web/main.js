@@ -156,7 +156,7 @@ setInterval(async () => {
   } catch (_) {}
 }, 2000)
 
-/* ── Starred models (= presets = shortlist di scelta rapida) ────── */
+/* ── Starred models (= presets = quick-pick shortlist) ────── */
 async function loadPresets() {
   try { const r = await api('GET', '/api/presets'); presets = r.presets || [] } catch (_) { presets = [] }
   renderFilters(); renderModelList()
@@ -224,7 +224,7 @@ async function setThinking(mode) {
 }
 
 /* ── Reasoning effort ──────────────────────────
-   Granularità oltre thinking on/off:
+   Finer granularity than thinking on/off:
    low (fast), medium (balanced), high (deep). */
 let reasoningEffort = 'auto'
 
@@ -296,7 +296,7 @@ const FILTERS = ['starred', 'all', 'popular']
 function getFilteredModels() {
   let list
   if (modelFilter === 'starred') {
-    // in ordine di stellatura
+    // in the order they were starred
     list = presets.map(id => allModels.find(m => m.id === id) || { id, owned_by: '' })
   } else if (modelFilter === 'popular') {
     list = allModels.filter(m => POPULAR_MODELS.has(m.id))
@@ -305,7 +305,7 @@ function getFilteredModels() {
   }
   const q = ($('modelSearch').value || '').toLowerCase()
   if (q) list = list.filter(m => m.id.toLowerCase().includes(q))
-  // modello attivo pinnato in cima a qualsiasi filtro
+  // active model pinned to the top under any filter
   if (activeModel) {
     const i = list.findIndex(m => m.id === activeModel)
     if (i > 0) { const [a] = list.splice(i, 1); list.unshift(a) }
@@ -334,8 +334,8 @@ async function fetchModels() {
     renderFilters(); renderModelList(); renderUsage()
   } catch (_) { $('modelList').innerHTML = '<div class="browser-empty">Failed to load</div>' }
 }
-// Refresco il catalogo ogni 60s: NVIDIA toglie/rinomina modelli senza preavviso,
-// e la lista deve seguire senza dover ricaricare la pagina.
+// Refresh the catalog every 60s: NVIDIA removes/renames models without notice,
+// and the list has to follow along without a page reload.
 setInterval(fetchModels, 60000)
 
 async function testModel(id, btn) {
@@ -366,12 +366,12 @@ function renderModelList() {
     const item = document.createElement('div')
     item.className = `browser-item ${m.id === activeModel ? 'active' : ''}`
     // m.id / m.owned_by / m.health come straight from the upstream /v1/models
-    // response (arricchita dal proxy con ModelHealth). Remote data never
+    // response (enriched by the proxy with ModelHealth). Remote data never
     // becomes markup.
     const nm = document.createElement('span'); nm.className = 'browser-name'; nm.textContent = m.id
     item.appendChild(nm)
-    // Badge di salute: circuito aperto (modello giù) o failure rate alto
-    // (modello degradato) → il problema è NVIDIA, non le key.
+    // Health badge: open circuit (model down) or high failure rate
+    // (model degraded) → the problem is NVIDIA, not the keys.
     if (m.health) {
       const h = m.health
       let cls = '', label = ''

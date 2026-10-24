@@ -707,6 +707,12 @@ def open_desk(port: int) -> None:
     )
 
     signaller = _make_signaller(icon_path, window, port)
+    # The tray is a QSystemTrayIcon and drives window.native as a Qt window,
+    # so the window must run on pywebview's Qt backend too. pywebview picks
+    # GTK first on any Linux desktop that is not KDE (Hyprland/Omarchy, GNOME,
+    # Sway): the Qt application never existed, the tray never appeared, and
+    # close-to-tray hid the window with nothing left to bring it back.
+    gui = "qt" if sys.platform.startswith("linux") else None
 
     def on_closing():
         """Close-to-tray: hide the window, do NOT kill the proxy."""
@@ -733,6 +739,7 @@ def open_desk(port: int) -> None:
     if signaller is not None:
         webview.start(
             func=_tray_waiter_factory(signaller, window),
+            gui=gui,
             debug=False,
             icon=icon_path,
         )
@@ -744,7 +751,7 @@ def open_desk(port: int) -> None:
 
         window.events.closing -= on_closing
         window.events.closed += kill_proxy
-        webview.start(debug=False, icon=icon_path)
+        webview.start(gui=gui, debug=False, icon=icon_path)
 
 
 USAGE = f"""OpenVidia — multi-key proxy for NVIDIA NIM
