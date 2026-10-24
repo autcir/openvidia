@@ -42,7 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The repository is English-only: remaining Italian comments, docs and two
   prompt strings sent to models translated
 - CI runs on the `soliso-autcir-openvidia` runner; release actions are
-  pinned to commit SHAs and the PyPI upload runs without checking out code
+  pinned to commit SHAs and the OIDC token that can publish to PyPI exists
+  only in the PyPI job
 - Per-model presets follow the October 2026 catalog: `deepseek-v4-pro` and
   `glm-5.2` (retired) removed, `deepseek-ai/deepseek-v4.1-flash` added with
   the sampling values from its model card

@@ -4,6 +4,13 @@ on:
   push:
     tags:
       - "v*"
+  # Publish an existing tag to PyPI again, e.g. after the trusted publisher
+  # was configured on pypi.org: gh workflow run release.yml -f tag=v2.2.0
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to publish to PyPI (vX.Y.Z)
+        required: true
 
 # Every action in this file is pinned to a full commit SHA: these jobs hold
 # contents:write and an OIDC token that can publish to PyPI, so a moved tag
@@ -14,6 +21,7 @@ permissions:
 
 jobs:
   release:
+    if: github.event_name == 'push'
     # Self-hosted runner on soliso: hosted jobs need GitHub Actions minutes and
     # the account is locked for billing — the self-hosted runner is immune.
     runs-on: [self-hosted, soliso, autcir, openvidia]
@@ -51,50 +59,44 @@ jobs:
           body_path: notes.md
           draft: false
 
-  build:
-    # Build in a job WITHOUT the OIDC token, so the code that runs during the
-    # build (setuptools, the project's own build hooks) never holds a
-    # credential that can publish.
-    name: Build sdist and wheel
-    runs-on: [self-hosted, soliso, autcir, openvidia]
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
-
-      - name: Build
-        run: uv build
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: dist
-          path: dist/
-          if-no-files-found: error
-
   pypi:
     # Trusted Publishing: PyPI trusts this workflow through OIDC, so no API
     # token is stored anywhere. It needs a one-time "trusted publisher" entry
     # on pypi.org for autcir/openvidia, workflow release.yml, environment pypi.
-    # This job checks out no code: it only uploads the artifacts built above.
-    name: Publish to PyPI
-    needs: [release, build]
+    #
+    # Build and upload share one job: the account cannot store artifacts
+    # ("Artifact storage quota has been hit", billing lock), so a separate
+    # build job has no way to hand over dist/. The OIDC token exists only in
+    # this job, and every action in it is pinned to a commit SHA.
+    name: Build and publish to PyPI
+    needs: release
+    if: ${{ !cancelled() && (needs.release.result == 'success' || github.event_name == 'workflow_dispatch') }}
     runs-on: [self-hosted, soliso, autcir, openvidia]
     environment:
       name: pypi
       url: https://pypi.org/project/openvidia/
     permissions:
+      contents: read
       id-token: write
     steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - name: Validate the tag
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::not a release tag: $TAG"; exit 1; }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          name: dist
-          path: dist/
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+
+      - name: Build sdist and wheel
+        run: |
+          rm -rf dist
+          uv build
 
       - name: Publish
         run: uv publish --trusted-publishing always dist/*
