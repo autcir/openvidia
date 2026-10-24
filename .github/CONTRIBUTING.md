@@ -94,6 +94,10 @@ def test_mark_key_failed_sets_cooldown(self, proxy_state):
 
 ## 📝 Commit Messages
 
+Everything in the repository is in English: code, comments, docstrings,
+docs, commit messages, PR titles and descriptions. Commits before 2.2.0 have
+some Italian messages; the history is kept as is so existing clones stay valid.
+
 Follow [Conventional Commits](https://www.conventionalcommits.org/):
 
 - `feat:` New feature

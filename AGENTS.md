@@ -66,6 +66,8 @@ export ANTHROPIC_API_KEY=ignored
 
 ## Development
 
+English only: code, comments, docstrings, docs, commit messages and PRs.
+
 ```bash
 pip install -e .
 pytest tests/ -v          # 303 tests
