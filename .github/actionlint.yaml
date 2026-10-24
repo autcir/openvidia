@@ -1,0 +1,7 @@
+# Labels of the self-hosted runner every workflow runs on:
+# soliso-autcir-openvidia on the soliso VPS.
+self-hosted-runner:
+  labels:
+    - soliso
+    - autcir
+    - openvidia

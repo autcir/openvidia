@@ -14,22 +14,26 @@ on:
 jobs:
   deploy:
     name: Update & Restart
-    runs-on: [self-hosted, soliso, openvidia]
+    runs-on: [self-hosted, soliso, autcir, openvidia]
     if: github.event.workflow_run.conclusion == 'success'
 
     steps:
-      # soliso runs the proxy as an editable install out of ~/apps/openvidia,
-      # so the deploy is a fast-forward of that checkout — not a system-wide
-      # install. `uv pip install --system` wrote to /usr/lib/python*/site-packages
-      # as an unprivileged runner and failed with EACCES on every run since the
-      # workflow was added.
+      # soliso runs the proxy as an editable install out of
+      # ~/.local/share/openvidia (venv in ~/.local/share/openvidia-venv), which
+      # is what openvidia.service starts — so the deploy is a fast-forward of
+      # that checkout, not a system-wide install. `uv pip install --system`
+      # wrote to /usr/lib/python*/site-packages as an unprivileged runner and
+      # failed with EACCES; the paths after that pointed at ~/apps/openvidia,
+      # which does not exist on soliso.
       - name: Update the hub checkout
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          cd ~/apps/openvidia
-          git fetch --depth 1 origin "${{ github.event.workflow_run.head_sha }}"
+          cd ~/.local/share/openvidia
+          git fetch --depth 1 origin "$HEAD_SHA"
           git reset --hard FETCH_HEAD
           git log --oneline -1
-          VIRTUAL_ENV="$HOME/apps/openvidia/.venv" uv pip install -q -e .
+          VIRTUAL_ENV="$HOME/.local/share/openvidia-venv" uv pip install -q -e .
 
       # The unit is a systemd *user* unit. The old step probed it with
       # `systemctl list-unit-files`, which only sees system units, so it always

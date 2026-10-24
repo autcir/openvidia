@@ -1,4 +1,4 @@
-"""Test del graph engine: loop agent, orchestrazione worker, generator-verifier."""
+"""Graph engine tests: agent loop, worker orchestration, generator-verifier."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ def with_usage(resp: dict, prompt: int = 10, completion: int = 5) -> dict:
 
 
 class ScriptedProvider(Provider):
-    """Provider fake: ogni chiamata pop la prossima risposta dalla script."""
+    """Fake provider: each call pops the next response from the script."""
 
     def __init__(self, script: list[dict]) -> None:
         self.script = list(script)
@@ -366,7 +366,7 @@ async def test_generate_and_verify_rejected_then_approved() -> None:
     assert approved is True
     assert rounds == 2
     assert artifact == "draft two"
-    # Il generator del round 2 riceve il feedback del round 1 nel primo turno utente.
+    # The round-2 generator receives the round-1 feedback in the first user turn.
     assert "Feedback from verifier (round 1)" in generator.last_messages[1]["content"]
 
 

@@ -50,8 +50,8 @@ class EmbeddingCache:
         return body
 
     def set(self, model: str, inputs: str | list[str], body: bytes) -> None:
-        # La prune è pigra: se la soglia è superata si butta il 10% più vecchio,
-        # senza scansioni complete a ogni inserimento.
+        # Pruning is lazy: once the threshold is exceeded the oldest 10% is dropped,
+        # with no full scan on every insert.
         if len(self._entries) >= self.max_entries:
             oldest = sorted(self._entries.items(), key=lambda kv: kv[1][0])[
                 : max(1, self.max_entries // 10)

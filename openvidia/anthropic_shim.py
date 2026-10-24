@@ -127,7 +127,7 @@ def _anthropic_to_chat_messages(body: dict) -> list[dict]:
                 # NVIDIA NIM has no vision support — inject a textual
                 # placeholder so the model knows an image was present,
                 # rather than silently dropping it.
-                text_parts.append("[immagine omessa: il modello non supporta vision]")
+                text_parts.append("[image omitted: the model does not support vision]")
 
         # Assemble the final message(s).
         if role == "assistant":

@@ -71,8 +71,8 @@ def httpx_timeout_kwargs() -> dict[str, float]:
 
 
 # ── Upstream endpoints (single source of truth) ────────────────────────
-# Base URL per NVIDIA NIM; la variante /chat/completions è usata da
-# responses_shim, anthropic_shim e compaction.
+# NVIDIA NIM base URL; the /chat/completions variant is used by
+# responses_shim, anthropic_shim and compaction.
 UPSTREAM_BASE = "https://integrate.api.nvidia.com/v1/"
 UPSTREAM_CHAT = UPSTREAM_BASE + "chat/completions"
 
@@ -124,10 +124,10 @@ _MODEL_OPTIONS_DEFAULTS = {
     # NVIDIA NIM 2026: new models use enable_thinking, older use chat_template_kwargs.thinking
     "thinking_off_payload": {"chat_template_kwargs": {"enable_thinking": False}},
     "thinking_on_payload": {"chat_template_kwargs": {"enable_thinking": True}},
-    # ── Reasoning effort: granularità oltre on/off ──
-    # low   → thinking off + temperature alta (fast, zero reasoning)
-    # medium → thinking on  + temperature media (balanced)
-    # high  → thinking on  + temperature bassa (focused, deep reasoning)
+    # ── Reasoning effort: finer granularity than on/off ──
+    # low   → thinking off + high temperature (fast, zero reasoning)
+    # medium → thinking on  + medium temperature (balanced)
+    # high  → thinking on  + low temperature (focused, deep reasoning)
     "reasoning_effort": "auto",  # "auto" | "low" | "medium" | "high"
     "effort_payloads": {
         "low": {"chat_template_kwargs": {"enable_thinking": False}, "temperature": 0.7},
@@ -240,7 +240,7 @@ def apply_model_options(payload: dict) -> dict:
             _fill_missing(payload, extra)
             return payload
 
-    # 3. Fallback: toggle thinking binario auto/on/off
+    # 3. Fallback: binary auto/on/off thinking toggle
     mode = per.get("thinking") or opts.get("thinking", "auto")
     if mode == "off":
         extra = opts.get("thinking_off_payload") or {}
@@ -475,8 +475,8 @@ def jcode_config_path() -> Path:
 def upstream_endpoints() -> list[str]:
     """Upstream endpoints for the router: env beats file beats default.
 
-    La lista si mantiene ordinata: il primo endpoint è il preferito, gli
-    altri sono fallback per il failover.
+    The list keeps its order: the first endpoint is the preferred one, the
+    others are fallbacks for failover.
     """
     env = os.environ.get("OPENVIDIA_UPSTREAM_ENDPOINTS", "").strip()
     if env:

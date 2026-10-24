@@ -17,7 +17,7 @@ on:
 jobs:
   catalog:
     name: Shipped model ids still served
-    runs-on: [self-hosted, soliso, openvidia]
+    runs-on: [self-hosted, soliso, autcir, openvidia]
 
     steps:
       - uses: actions/checkout@v7

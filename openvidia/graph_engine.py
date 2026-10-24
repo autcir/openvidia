@@ -16,8 +16,8 @@ from typing import Any
 import httpx
 
 DEFAULT_BASE_URL = "http://127.0.0.1:1919/v1"
-# L'alias "openvidia" è risolto dal proxy all'active model: robusto ai cambi
-# di modello senza toccare il client (un ID upstream hardcoded andrebbe in 404).
+# The proxy resolves the "openvidia" alias to the active model: this survives
+# model switches without touching the client (a hardcoded upstream ID would 404).
 DEFAULT_MODEL = "openvidia"
 MAX_BUDGET_EXHAUSTED = "<budget exhausted>"
 MAX_ITERATIONS_REACHED = "<max iterations reached>"
@@ -46,7 +46,7 @@ class Provider:
         if self.temperature is not None:
             payload["temperature"] = self.temperature
         own_client = client is None
-        # Il client si chiude solo se creato qui: chi lo passa (hub.client) lo gestisce.
+        # Close the client only if it was created here: whoever passes one (hub.client) owns it.
         hc = client or httpx.AsyncClient(timeout=self.timeout_s)
         try:
             resp = await hc.post(
@@ -181,8 +181,8 @@ async def run_agent(
     agent_provider = provider or hub.default_provider
     if callable(agent_provider):
         agent_provider = agent_provider(name)
-    # Idempotente: lo spawn registra già nome e mailbox prima di creare il task,
-    # così un worker cancellato prima dello start risulta comunque registrato.
+    # Idempotent: spawn already registers the name and mailbox before creating the task,
+    # so a worker cancelled before it starts still shows up as registered.
     if name not in hub._status:
         hub.register(name)
 
@@ -212,7 +212,7 @@ async def run_agent(
                 reply = await agent_provider.chat(messages, tools=schemas, client=hub.client)
                 choices = reply.get("choices") or []
                 if not choices:
-                    # Risposta vuota: meglio crashare che far credere a un successo.
+                    # Empty response: better to crash than to pass it off as a success.
                     raise RuntimeError(f"empty response from {agent_provider.model}")
                 choice = choices[0]
                 message = choice.get("message", {})
@@ -273,7 +273,7 @@ async def _send_message(args: dict[str, Any], ctx: AgentCtx) -> str:
     message = args.get("message") or ""
     if not message:
         return "error: 'message' required"
-    # Validare prima di consegnare: niente messaggi a metà strada.
+    # Validate before delivering: no half-delivered messages.
     for recipient in recipients:
         if recipient not in ctx.hub._status:
             return f"error: unknown agent '{recipient}'"
@@ -294,7 +294,7 @@ async def _wait_for_message(args: dict[str, Any], ctx: AgentCtx) -> str:
 def _make_create_subagents(
     worker_factory: Callable[[str], WorkerSpec],
 ) -> Callable[[dict[str, Any], AgentCtx], Awaitable[str]]:
-    # Closure sulla factory: il handler di un tool non riceve la factory dagli args.
+    # Closure over the factory: a tool handler does not receive the factory via args.
     async def create_subagents(args: dict[str, Any], ctx: AgentCtx) -> str:
         return await _create_subagents(args, ctx, worker_factory)
 
@@ -319,10 +319,10 @@ async def _create_subagents(
         spec_provider = spec.provider
         if callable(spec_provider):
             spec_provider = spec_provider(name)
-        # Registrazione sincrona: lo status deve esistere anche se il task viene
-        # cancellato prima di partire (il corpo di un task mai avviato non gira).
+        # Synchronous registration: the status must exist even if the task is
+        # cancelled before it starts (the body of a never-started task does not run).
         ctx.hub.register(name)
-        # Depth bound: i worker girano senza worker_factory, non possono spawnare.
+        # Depth bound: workers run without worker_factory, so they cannot spawn.
         task = asyncio.create_task(
             run_agent(
                 ctx.hub,
@@ -351,7 +351,7 @@ async def _kill_subagents(args: dict[str, Any], ctx: AgentCtx) -> str:
             return f"error: agent '{name}' not running"
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-        # Copre il caso task mai avviato: il corpo non esegue il finally di run_agent.
+        # Covers the never-started task case: the body does not run run_agent's finally.
         ctx.hub._status[name] = "killed"
         killed.append(name)
     return f"killed: {', '.join(killed)}"
@@ -360,7 +360,7 @@ async def _kill_subagents(args: dict[str, Any], ctx: AgentCtx) -> str:
 def graph_tools(
     hub: Hub, worker_factory: Callable[[str], WorkerSpec] | None = None
 ) -> list[ToolSpec]:
-    """Tools di coordinamento: sempre status/messaggi; spawn/kill solo con factory."""
+    """Coordination tools: status/messages always; spawn/kill only with a factory."""
     tools: list[ToolSpec] = [
         ToolSpec(
             "get_status",
@@ -452,7 +452,7 @@ async def generate_and_verify(
             f"{name}:ver:{round_no}",
             system=(
                 "You are a strict verifier. Judge the artifact against the rubric. "
-                "Reply ONLY with APPROVED or REJECTED: <motivo>"
+                "Reply ONLY with APPROVED or REJECTED: <reason>"
             ),
             first_turn=f"Rubric:\n{rubric}\n\nArtifact:\n{artifact}\n\nVerdict:",
             provider=verifier,

@@ -36,7 +36,7 @@ def load_provider_configs() -> list[ProviderConfig]:
     try:
         entries = json.loads(raw)
     except (ValueError, TypeError):
-        # Un JSON corrotto non deve mai far cadere il proxy: si ignora.
+        # A corrupt JSON file must never bring the proxy down: ignore it.
         return []
     if not isinstance(entries, list):
         return []

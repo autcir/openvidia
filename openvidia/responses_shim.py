@@ -203,8 +203,8 @@ async def _rotation_phase(
     Parameters:
         method: HTTP method (default POST, used by shims; catch-all passes request.method).
         content: raw body bytes (used by catch-all; when None, json=payload is used).
-        probe_timeout: se fornito, il primo tentativo usa questo timeout per
-            rilevare modelli morti; i successivi usano ``timeout``.
+        probe_timeout: if given, the first attempt uses this timeout to
+            detect dead models; subsequent attempts use ``timeout``.
         outcome_box: optional dict filled with the last upstream status and
             error body. The caller needs it to answer with what the provider
             actually said instead of a generic "all keys exhausted", which is
@@ -263,7 +263,7 @@ async def _rotation_phase(
             resp = None
             _model = payload.get("model", "") if isinstance(payload, dict) else ""
             _t0 = time.monotonic()
-            # Primo tentativo: probe timeout per rilevare modelli morti in fretta.
+            # First attempt: probe timeout to detect dead models quickly.
             _send_timeout = timeout
             if probe_timeout is not None and attempts == 1:
                 _send_timeout = probe_timeout

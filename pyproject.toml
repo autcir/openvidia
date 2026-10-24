@@ -10,8 +10,9 @@ dependencies = [
     "httpx[http2]>=0.27",
     "psutil>=6.0",
     "pywebview>=5.0",
-    "PyGObject>=3.42; platform_system=='Linux'",
-    "pycairo>=1.20; platform_system=='Linux'",
+    # Linux runs the window on pywebview's Qt backend (the tray is Qt), so the
+    # GTK stack (PyGObject, pycairo) is not needed — and PyGObject builds from
+    # source, failing any pip install without the gobject-introspection headers.
     "PyQt6>=6.5; platform_system=='Linux'",
     "PyQt6-WebEngine>=6.5; platform_system=='Linux'",
     "qtpy>=2.4; platform_system=='Linux'",

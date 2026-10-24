@@ -39,14 +39,14 @@ def test_embedding_cache_hit_miss_and_shape_sensitivity() -> None:
     cache.set("m", "hi", b"body")
     assert cache.get("m", "hi") == b"body"
     assert cache.hits == 1
-    # L'ordine e la forma dell'input contano: una stringa non è una lista.
+    # The order and shape of the input matter: a string is not a list.
     assert cache.get("m", ["hi"]) is None
 
 
 def test_embedding_cache_ttl_and_prune() -> None:
     expired = EmbeddingCache(ttl_s=-1.0)
     expired.set("m", "hi", b"x")
-    assert expired.get("m", "hi") is None  # già scaduto al primo accesso
+    assert expired.get("m", "hi") is None  # already expired on first access
 
     small = EmbeddingCache(max_entries=2, ttl_s=300.0)
     for i in range(3):
@@ -81,8 +81,8 @@ def test_rpm_tracker_learns_ceiling_from_retry_after() -> None:
     assert tracker.observed_ceiling == 2
     tracker.record()
     tracker.record()
-    assert not tracker.can_send()  # 2 RPM serviti, tetto raggiunto
-    tracker.learn_from_retry_after(10.0)  # meno restrittivo: non peggiora
+    assert not tracker.can_send()  # 2 RPM served, ceiling reached
+    tracker.learn_from_retry_after(10.0)  # less restrictive: does not make it worse
     assert tracker.observed_ceiling == 2
 
 
@@ -91,7 +91,7 @@ def test_mark_key_failed_429_learns_observed_ceiling() -> None:
     state.mark_key_failed("k1", status=429, retry_after="30")
     tracker = state.rpm["k1"]
     assert tracker.observed_ceiling == 2
-    assert tracker.max_rpm == 14  # 28 * ADAPTIVE_429_FACTOR, floor incluso
+    assert tracker.max_rpm == 14  # 28 * ADAPTIVE_429_FACTOR, floor included
     assert state.is_key_on_cooldown("k1")
 
 
@@ -106,8 +106,8 @@ def test_key_model_score_reorders_candidates_by_model_record() -> None:
         state.record_key_model_result("k1", "m", ok=False)
     state.record_key_model_result("k2", "m", ok=True, ttft=0.1)
     assert state.key_model_score("k2", "m") > state.key_model_score("k1", "m")
-    # A parità di carico, senza modello vince l'indice; con il modello la
-    # chiave con record migliore su quel modello passa avanti.
+    # At equal load, without a model the index wins; with the model the
+    # key with the better record on that model moves ahead.
     assert state.get_candidate_keys()[0][1] == "k1"
     assert state.get_candidate_keys("m")[0][1] == "k2"
 
@@ -180,9 +180,9 @@ async def test_try_fallback_rewrites_model_and_fails_quietly() -> None:
 
         dead = ProviderConfig("d", "https://dead.example/v1", "sk", {})
         assert await try_fallback(client, {"model": "x"}, dead) is None
-        # Modello non mappato: si usa il primo della mappa.
+        # Unmapped model: the first entry of the map is used.
         assert rewrite_payload({"model": "other"}, provider)["model"] == "glm-5"
-        # Nessuna mappa: payload invariato.
+        # No map: payload unchanged.
         assert rewrite_payload({"model": "x"}, dead)["model"] == "x"
     finally:
         await client.aclose()
@@ -193,11 +193,11 @@ async def test_try_fallback_rewrites_model_and_fails_quietly() -> None:
 
 @pytest.mark.asyncio
 async def test_redis_sync_disabled_without_extra() -> None:
-    # Il venv di test non ha redis installato: tutto deve degradare senza errori.
+    # The test venv does not have redis installed: everything must degrade without errors.
     rs = RedisSync("redis://localhost:6379")
     try:
         assert not rs.enabled
-        rs.broadcast({"kind": "cooldown"})  # no-op, non deve sollevare
+        rs.broadcast({"kind": "cooldown"})  # no-op, must not raise
         await rs.start()  # no-op
     finally:
         await rs.close()
@@ -216,7 +216,7 @@ def test_apply_remote_event_applies_without_reemit() -> None:
         }
     )
     assert state.is_key_on_cooldown("k1")
-    # Un cooldown già scaduto non deve sovrascrivere quello attivo.
+    # An already-expired cooldown must not overwrite the active one.
     state.apply_remote_event(
         {"kind": "cooldown", "key": "k1", "until": time.time() - 5, "reason": "r"}
     )
@@ -233,4 +233,4 @@ def test_apply_remote_event_applies_without_reemit() -> None:
     state.apply_remote_event({"kind": "model_circuit", "model": "m", "opened": False})
     assert not state.is_model_circuit_open("m")
 
-    state.apply_remote_event({"kind": "weird"})  # ignorato senza eccezioni
+    state.apply_remote_event({"kind": "weird"})  # ignored without exceptions
