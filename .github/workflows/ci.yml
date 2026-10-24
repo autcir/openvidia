@@ -9,7 +9,7 @@ on:
 jobs:
   test:
     name: Pytest
-    runs-on: [self-hosted, soliso, openvidia]
+    runs-on: [self-hosted, soliso, autcir, openvidia]
 
     steps:
       - uses: actions/checkout@v7
@@ -31,7 +31,7 @@ jobs:
 
   lint:
     name: Ruff
-    runs-on: [self-hosted, soliso, openvidia]
+    runs-on: [self-hosted, soliso, autcir, openvidia]
 
     steps:
       - uses: actions/checkout@v7
@@ -50,7 +50,7 @@ jobs:
 
   package:
     name: Wheel installs and serves
-    runs-on: [self-hosted, soliso, openvidia]
+    runs-on: [self-hosted, soliso, autcir, openvidia]
 
     steps:
       - uses: actions/checkout@v7
@@ -91,7 +91,7 @@ jobs:
 
   shell:
     name: Shellcheck
-    runs-on: [self-hosted, soliso, openvidia]
+    runs-on: [self-hosted, soliso, autcir, openvidia]
 
     steps:
       - uses: actions/checkout@v7

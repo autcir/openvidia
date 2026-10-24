@@ -16,7 +16,7 @@ jobs:
   release:
     # Self-hosted runner on soliso: hosted jobs need GitHub Actions minutes and
     # the account is locked for billing — the self-hosted runner is immune.
-    runs-on: [self-hosted, soliso, openvidia]
+    runs-on: [self-hosted, soliso, autcir, openvidia]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -56,7 +56,7 @@ jobs:
     # build (setuptools, the project's own build hooks) never holds a
     # credential that can publish.
     name: Build sdist and wheel
-    runs-on: [self-hosted, soliso, openvidia]
+    runs-on: [self-hosted, soliso, autcir, openvidia]
     permissions:
       contents: read
     steps:
@@ -81,7 +81,7 @@ jobs:
     # This job checks out no code: it only uploads the artifacts built above.
     name: Publish to PyPI
     needs: [release, build]
-    runs-on: [self-hosted, soliso, openvidia]
+    runs-on: [self-hosted, soliso, autcir, openvidia]
     environment:
       name: pypi
       url: https://pypi.org/project/openvidia/

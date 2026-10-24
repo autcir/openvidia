@@ -75,6 +75,13 @@ ruff check openvidia/ tests/
 ruff format --check openvidia/ tests/
 ```
 
+### CI runner
+
+Every workflow runs on the self-hosted runner `soliso-autcir-openvidia` on the
+soliso VPS, labels `[self-hosted, soliso, autcir, openvidia]`. GitHub-hosted
+runners are unavailable (the account is billing-locked). Pull requests from
+outside contributors need maintainer approval before any job runs.
+
 ### Config files (`~/.config/openvidia/`)
 
 | File | Purpose |
