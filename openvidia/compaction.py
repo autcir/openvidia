@@ -53,13 +53,18 @@ _DEFAULTS = {
     # the budget means the next turn overflows again immediately — the
     # "recompact every single turn" loop. 0.6 leaves room for several turns.
     "compact_ratio": 0.6,
-    # Summarization NEVER uses the hot streamed model the client is hammering
-    # (Codex/whatever); it uses a server-local "quiet" model so a compaction
-    # request competes for keys on a DIFFERENT traffic stream, never the same.
-    # Set to "" to fall back to the user's selected model.
-    # Strongly recommended: point this at a FAST model — a reasoning-heavy
-    # model needs 25s+ to compress 70k tokens. Default to ultra-fast Llama-3.1 8B.
-    "summary_model": "meta/llama-3.1-8b-instruct",
+    # Set this to a server-local "quiet" model so summarization does not use
+    # the hot streamed model the client is hammering (Codex/whatever): a
+    # compaction request then competes for keys on a DIFFERENT traffic stream.
+    # Empty = the user's selected model. Strongly recommended: point this at
+    # a FAST model — a reasoning-heavy model needs 25s+ to compress 70k
+    # tokens. The default is empty on purpose: it used to pin
+    # meta/llama-3.1-8b-instruct, the provider retired it, and every
+    # compaction then spent its attempts on 404s and fell back to trimming.
+    # A model that 404s is also retried once on the user's model (see
+    # _start_summarize), so a stale value in compaction.json degrades the
+    # same way.
+    "summary_model": "",
     # Hard cap on summarize attempts: if the pool is saturated we must NOT
     # serially try all 25 keys, so we bail to deterministic trim after this
     # many rotate-attempts.
@@ -361,6 +366,14 @@ def _cache_get(ck: str, old: list[dict]) -> tuple[int, str] | None:
     return covered, summary
 
 
+class ModelNotFoundError(RuntimeError):
+    """The upstream answered 404 for the summary model: retired or misspelled."""
+
+    def __init__(self, model: str) -> None:
+        super().__init__(f"summarize HTTP 404: model {model!r} not found upstream")
+        self.model = model
+
+
 async def _summarize(
     client,
     keys: list[str],
@@ -449,6 +462,10 @@ async def _summarize(
                     attempts -= 1  # Don't burn attempt on transient worker limit
                     await asyncio.sleep(0.5)
                     continue
+                if resp.status_code == 404:
+                    # The model does not exist for any key: rotating would
+                    # only spend the remaining attempts on the same answer.
+                    raise ModelNotFoundError(model)
                 last_err = f"summarize HTTP {resp.status_code}"
                 if resp.status_code == 429:
                     seen_429 = True
@@ -629,20 +646,26 @@ def _start_summarize(
     new_msgs: list[dict],
     cfg: dict,
     log: Callable[[str], None],
+    fallback_model: str = "",
 ) -> asyncio.Task:
-    """Launch (or reuse) the single summarize task for this conversation."""
+    """Launch (or reuse) the single summarize task for this conversation.
+
+    ``fallback_model`` is tried once when ``model`` 404s: a summary model the
+    provider retired must not turn every compaction into a trim.
+    """
     existing = _inflight.get(ck)
     if existing and not existing[0].done():
         return existing[0]
 
     started = time.monotonic()
     n_new = len(new_msgs)
+    used = model
 
-    async def _run() -> str:
+    async def _attempt(m: str) -> str:
         return await _summarize(
             client,
             keys,
-            model,
+            m,
             base,
             new_msgs,
             cfg["summary_max_tokens"],
@@ -651,6 +674,17 @@ def _start_summarize(
             msg_cap=cfg.get("summary_msg_chars", 4_000),
             total_cap=cfg.get("summary_input_chars", 120_000),
         )
+
+    async def _run() -> str:
+        nonlocal used
+        try:
+            return await _attempt(model)
+        except ModelNotFoundError:
+            if not fallback_model or fallback_model == model:
+                raise
+            log(f"⧉ compaction: summary_model {model!r} not found upstream → {fallback_model}")
+            used = fallback_model
+            return await _attempt(fallback_model)
 
     task = asyncio.ensure_future(_run())
 
@@ -669,7 +703,7 @@ def _start_summarize(
         _cache_put(ck, covered_target, summary, fp)
         log(
             f"⧉ compaction: summarized {n_new} new msg (covers {covered_target}) "
-            f"→ {len(summary)} char in {elapsed:.1f}s (model={model})"
+            f"→ {len(summary)} char in {elapsed:.1f}s (model={used})"
         )
 
     task.add_done_callback(_done)
@@ -754,7 +788,8 @@ async def maybe_compact(
     # is the source of truth when summary_model is unset.
     from .proxy_app import default_model
 
-    summary_model = cfg.get("summary_model") or default_model(state)
+    user_model = default_model(state)
+    summary_model = cfg.get("summary_model") or user_model
     candidate_keys, n_keys = _healthy_keys(state)
     min_healthy = max(1, int(n_keys * cfg.get("min_healthy_fraction", 0.25)))
 
@@ -781,6 +816,7 @@ async def maybe_compact(
             new_msgs=new_msgs,
             cfg=cfg,
             log=log,
+            fallback_model=user_model,
         )
 
     if task is not None:

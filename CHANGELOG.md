@@ -5,6 +5,32 @@ All notable changes to OpenVidia will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-10-24
+
+### Fixed
+- **Compaction summaries on a retired model.** `summary_model` defaulted to
+  `meta/llama-3.1-8b-instruct`, which NVIDIA no longer serves: every
+  compaction spent its attempts on 404s and fell back to trimming. The
+  default is now empty (the user's selected model), a 404 stops key rotation
+  at once, and a summary model that 404s is retried once on the user's model
+- HTTP/2 to the upstream can be turned off with `OPENVIDIA_HTTP2=0` (#10)
+
+### Added
+- Upstream health badge, per-model health status and auto-refreshing model
+  catalog in the dashboard
+- `Model catalog` workflow: weekly, fails when a model id the code ships is
+  no longer in `GET /v1/models`
+- Issue forms for bugs, model presets and feature requests
+- Release workflow publishes the wheel and sdist to PyPI through Trusted
+  Publishing (`pipx install openvidia`)
+
+### Changed
+- Per-model presets follow the October 2026 catalog: `deepseek-v4-pro` and
+  `glm-5.2` (retired) removed, `deepseek-ai/deepseek-v4.1-flash` added with
+  the sampling values from its model card
+- Dashboard "Popular" filter lists the current free-tier chat models
+- Repository URLs point to `autcir/openvidia`
+
 ## [2.1.0] - 2026-08-01
 
 ### Added

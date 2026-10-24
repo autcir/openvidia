@@ -141,18 +141,18 @@ _MODEL_OPTIONS_DEFAULTS = {
     "fallback": "off",
     # ── Per-model hardcoded optimizations ─────────────────────────────────
     # These are defaults from NVIDIA docs — the dashboard can still override.
+    # Only models the provider still serves belong here: an entry for a
+    # retired id is dead weight that hides which tuning is current. The
+    # catalog workflow (.github/workflows/catalog.yml) fails when one goes.
     # Key insight:
-    #   DeepSeek V4 Pro: enable_thinking=False → TTFT 60s→3s for coding
     #   Nemotron Ultra:  enable_thinking=False mandatory for tool calling;
     #                    temperature=1.0, top_p=0.95 per NVIDIA best practice
-    #   GLM 5.2:         thinking=False → stops the 180s block
+    #   DeepSeek V4.1 Flash: temperature=1.0, top_p=0.95 per its model card
     "per_model": {
-        "deepseek-ai/deepseek-v4-pro": {
-            "thinking": "off",
-            # temperature 0.0 = deterministic, best for coding accuracy
+        "deepseek-ai/deepseek-v4.1-flash": {
             "extra_payload": {
-                "chat_template_kwargs": {"enable_thinking": False},
-                "temperature": 0.0,
+                "temperature": 1.0,
+                "top_p": 0.95,
             },
         },
         "nvidia/nemotron-3-ultra-550b-a55b": {
@@ -163,12 +163,6 @@ _MODEL_OPTIONS_DEFAULTS = {
                 "chat_template_kwargs": {"enable_thinking": False},
                 "temperature": 1.0,
                 "top_p": 0.95,
-            },
-        },
-        "z-ai/glm-5.2": {
-            "thinking": "off",
-            "extra_payload": {
-                "chat_template_kwargs": {"thinking": False},
             },
         },
         "poolside/laguna-xs-2.1": {

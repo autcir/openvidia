@@ -632,7 +632,7 @@ class TestCompactionSettings:
         assert _DEFAULTS["budget_tokens"] == 80_000
         assert _DEFAULTS["keep_recent"] == 8
         assert _DEFAULTS["summary_max_tokens"] == 1024
-        assert _DEFAULTS["summary_model"] == "meta/llama-3.1-8b-instruct"
+        assert _DEFAULTS["summary_model"] == ""
 
     def test_settings_merges_user_overrides_over_defaults(self):
         settings = _settings()

@@ -7,7 +7,7 @@ pkgver=2.0.0.r0.gunknown
 pkgrel=1
 pkgdesc="Multi-key proxy for NVIDIA NIM with a native desktop dashboard — auto-rotation, cooldown, RPM limiting, Claude Code + Codex CLI + opencode support"
 arch=('any')
-url="https://github.com/ciroautuori/openvidia"
+url="https://github.com/autcir/openvidia"
 license=('MIT')
 depends=(
     'python>=3.12'
@@ -35,7 +35,7 @@ optdepends=(
 makedepends=('python-build' 'python-installer' 'python-setuptools' 'python-wheel' 'git')
 provides=('openvidia')
 conflicts=('openvidia')
-source=("$pkgname::git+https://github.com/ciroautuori/openvidia.git")
+source=("$pkgname::git+https://github.com/autcir/openvidia.git")
 md5sums=('SKIP')
 
 pkgver() {

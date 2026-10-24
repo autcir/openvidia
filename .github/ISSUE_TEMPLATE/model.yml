@@ -1,0 +1,40 @@
+name: Model tuning or retired model
+description: A NIM model needs a per-model preset, or one OpenVidia ships is gone.
+labels: [models]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Per-model presets live in `_MODEL_OPTIONS_DEFAULTS["per_model"]` in
+        `openvidia/config.py`. Only measured settings are accepted: say how
+        you measured them.
+  - type: input
+    id: model
+    attributes:
+      label: Model id (exactly as GET /v1/models returns it)
+      placeholder: deepseek-ai/deepseek-v4.1-flash
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What is it
+      options:
+        - New preset (thinking flag, sampling params)
+        - Existing preset is wrong
+        - Model retired upstream
+    validations:
+      required: true
+  - type: textarea
+    id: payload
+    attributes:
+      label: Payload and measurement
+      description: The extra_payload you propose and the time to first token with and without it.
+      render: json
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: Source
+      description: Model card on build.nvidia.com or other documentation, if any.

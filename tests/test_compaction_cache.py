@@ -388,3 +388,55 @@ class TestLearnedContextWindows:
     def test_unknown_model_stays_conservative_until_learned(self):
         cfg = dict(compaction._DEFAULTS)
         assert compaction._resolve_budget(cfg, "vendor/brand-new") == cfg["budget_tokens"]
+
+
+class TestRetiredSummaryModel:
+    """A summary model the provider retired must not turn compaction into trim."""
+
+    @pytest.mark.asyncio
+    async def test_404_stops_rotation_on_first_key(self):
+        import httpx
+
+        sent = []
+
+        def handler(request):
+            sent.append(request.headers["Authorization"])
+            return httpx.Response(404, json={"detail": "Function not found"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with pytest.raises(compaction.ModelNotFoundError) as exc:
+                await compaction._summarize(
+                    client,
+                    ["k1", "k2", "k3"],
+                    "gone/model",
+                    None,
+                    _msgs(3),
+                    256,
+                )
+        assert exc.value.model == "gone/model"
+        assert len(sent) == 1, "a 404 is the same for every key — rotating wastes attempts"
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_the_user_model(self, state, monkeypatch):
+        monkeypatch.setattr(
+            compaction,
+            "_settings",
+            lambda: {**compaction._DEFAULTS, "inline_deadline": 5.0, "summary_model": "gone/model"},
+        )
+        state.active_model = "live/model"
+        tried = []
+
+        async def fake(client, keys, model, *a, **kw):
+            tried.append(model)
+            if model == "gone/model":
+                raise compaction.ModelNotFoundError(model)
+            return "SUMMARY FROM FALLBACK"
+
+        monkeypatch.setattr(compaction, "_summarize", fake)
+        big = SYS + [{"role": "user", "content": "q " + "x" * 4_000} for _ in range(120)]
+        out = await maybe_compact(big, state=state, client=None, log=lambda m: None)
+        assert tried == ["gone/model", "live/model"]
+        assert any("SUMMARY FROM FALLBACK" in str(m.get("content", "")) for m in out)
+
+    def test_default_pins_no_model(self):
+        assert compaction._DEFAULTS["summary_model"] == ""
