@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.2.0] - 2026-10-24
 
 ### Fixed
+- **Desktop window on Linux desktops other than KDE** (Hyprland/Omarchy,
+  GNOME, Sway): pywebview picked GTK while the tray is Qt, so no tray
+  appeared, closing the window hid it for good, and on Omarchy GTK died with
+  `Error 71 (Protocol error) dispatching to Wayland display`. The window now
+  runs on the Qt backend on Linux
+- **Arch package**: `python-uvicorn` does not exist on Arch (`uvicorn`), so
+  pacman could not resolve the package; `python-h2` and `python-qtpy` added,
+  `webkit2gtk` (AUR-only) and `gobject-introspection` dropped
+- Deploy workflow pointed at `~/apps/openvidia`, which does not exist on the
+  hub; it now updates `~/.local/share/openvidia`
+- The Shellcheck CI job named a script that no longer exists and passed only
+  because shellcheck was missing on the runner
 - **Compaction summaries on a retired model.** `summary_model` defaulted to
   `meta/llama-3.1-8b-instruct`, which NVIDIA no longer serves: every
   compaction spent its attempts on 404s and fell back to trimming. The
@@ -25,6 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Publishing (`pipx install openvidia`)
 
 ### Changed
+- Linux installs no longer pull PyGObject and pycairo (unused with Qt;
+  PyGObject builds from source and broke pip installs without headers)
+- The repository is English-only: remaining Italian comments, docs and two
+  prompt strings sent to models translated
+- CI runs on the `soliso-autcir-openvidia` runner; release actions are
+  pinned to commit SHAs and the PyPI upload runs without checking out code
 - Per-model presets follow the October 2026 catalog: `deepseek-v4-pro` and
   `glm-5.2` (retired) removed, `deepseek-ai/deepseek-v4.1-flash` added with
   the sampling values from its model card
