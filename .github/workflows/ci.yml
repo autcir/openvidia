@@ -96,10 +96,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Check the installer and launcher
+      # Every tracked shell script, not a hand-written list: the list named
+      # openvidia-launcher.sh, which no longer exists, and the job only passed
+      # because shellcheck was missing on the runner and the step skipped
+      # itself. shellcheck is now installed on soliso, so a missing binary is
+      # an error, not a pass.
+      - name: Check every shell script
         run: |
-          if ! command -v shellcheck >/dev/null; then
-            echo "shellcheck is not installed on this runner — skipping"
-            exit 0
-          fi
-          shellcheck install.sh openvidia-launcher.sh
+          shellcheck --version
+          git ls-files -z '*.sh' | xargs -0 shellcheck
