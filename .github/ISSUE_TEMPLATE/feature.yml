@@ -1,0 +1,18 @@
+name: Feature or client integration
+description: Propose a feature, or support for another CLI or client.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What you cannot do today, and who hits it.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: How it should work. For a new client, the endpoint it calls and its config format.
+    validations:
+      required: true

@@ -8,27 +8,24 @@ let modelFilter = 'starred'
 let keyFilter = 'active'
 let _lastKeyStats = null
 
-/* ── Popular models shortcut ─────────────────── */
+/* ── Popular models shortcut ─────────────────
+   NVIDIA free-tier chat models, checked against GET /v1/models on
+   2026-10-24. The catalog changes monthly: ids the provider drops simply
+   stop matching, so a stale entry hides itself instead of breaking. */
 const POPULAR_MODELS = new Set([
-  'deepseek-ai/deepseek-v4-pro',
-  'deepseek-ai/deepseek-v4-flash',
-  'meta/llama-4.1-maverick-8b-instruct',
-  'meta/llama-3.3-70b-instruct',
-  'mistralai/mistral-large-2411',
-  'microsoft/phi-4-mini-instruct',
-  'google/gemma-3-27b-it',
-  'nvidia/llama-3.1-nemotron-70b-instruct',
-  'nvidia/nemotron-4-340b-reward',
-  'minimaxai/minimax-m3',
-  'z-ai/glm-5.2',
-  'moonshotai/kimi-k2.6',
-  '01-ai/yi-large',
-  'bytedance/seed-oss-36b-instruct',
-  'ai21labs/jamba-1.5-large-instruct',
-  'openai/gpt-4o',
-  'openai/gpt-4o-mini',
-  'google/gemma-3-12b-it',
-  'mistralai/mixtral-8x22b-instruct',
+  'z-ai/glm-5.3',
+  'z-ai/glm-5.3-flash',
+  'deepseek-ai/deepseek-v4.1-flash',
+  'nvidia/nemotron-3-ultra-550b-a55b',
+  'nvidia/nemotron-3.5-lightning-30b-a3b',
+  'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning',
+  'poolside/laguna-xs-2.1',
+  'google/gemma-4-31b-it',
+  'google/diffusiongemma-26b-a4b-it',
+  'meta/muse-glimmer-30b',
+  'openai/gpt-oss-20b',
+  'meta/llama-3.2-90b-vision-instruct',
+  'meta/llama-3.2-11b-vision-instruct',
 ])
 
 const $ = id => document.getElementById(id)
@@ -167,7 +164,7 @@ async function loadPresets() {
 async function savePresets() { try { await api('POST', '/api/presets', { presets }) } catch (_) {} renderFilters(); renderModelList() }
 
 function shortLabel(id) {
-  const known = { 'z-ai/glm-5.2': 'GLM 5.2', 'deepseek-ai/deepseek-v4-pro': 'DeepSeek V4 Pro', 'minimaxai/minimax-m3': 'MiniMax M3' }
+  const known = { 'z-ai/glm-5.3': 'GLM 5.3', 'z-ai/glm-5.3-flash': 'GLM 5.3 Flash', 'deepseek-ai/deepseek-v4.1-flash': 'DeepSeek V4.1 Flash' }
   if (known[id]) return known[id]
   return id.split('/').pop()
 }

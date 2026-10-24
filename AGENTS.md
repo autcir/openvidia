@@ -68,7 +68,7 @@ export ANTHROPIC_API_KEY=ignored
 
 ```bash
 pip install -e .
-pytest tests/ -v          # 91 test
+pytest tests/ -v          # 303 test
 ruff check openvidia/ tests/
 ruff format --check openvidia/ tests/
 ```

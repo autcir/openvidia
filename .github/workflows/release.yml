@@ -46,3 +46,27 @@ jobs:
         with:
           body_path: notes.md
           draft: false
+
+  pypi:
+    # Trusted Publishing: PyPI trusts this workflow through OIDC, so no API
+    # token is stored anywhere. It needs a one-time "trusted publisher" entry
+    # on pypi.org for autcir/openvidia, workflow release.yml, environment pypi.
+    name: Publish to PyPI
+    needs: release
+    runs-on: [self-hosted, soliso, openvidia]
+    environment:
+      name: pypi
+      url: https://pypi.org/project/openvidia/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Publish
+        run: uv publish --trusted-publishing always

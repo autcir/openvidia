@@ -39,6 +39,20 @@ def is_key_healthy(self, key: str) -> bool:
     return not self.is_key_on_cooldown(key)
 ```
 
+## 🤖 Model presets
+
+NVIDIA adds and retires NIM models every few weeks, and this is the easiest
+place to help. Per-model tuning lives in `_MODEL_OPTIONS_DEFAULTS["per_model"]`
+in `openvidia/config.py`; the dashboard "Popular" list is `POPULAR_MODELS` in
+`openvidia/web/main.js`.
+
+- Use the id exactly as `GET https://integrate.api.nvidia.com/v1/models`
+  returns it (no key needed).
+- Only measured settings: in the PR, give the time to first token with and
+  without the preset, or link the model card it comes from.
+- The `Model catalog` workflow fails when a shipped id is retired. A PR that
+  removes or replaces it is always welcome.
+
 ## 🧪 Testing
 
 ### Running Tests

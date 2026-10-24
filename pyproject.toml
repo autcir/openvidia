@@ -1,6 +1,6 @@
 [project]
 name = "openvidia"
-version = "2.1.0"
+version = "2.2.0"
 description = "NVIDIA NIM multi-key proxy with smart rate limiting, cooldown management, and desktop dashboard"
 readme = "README.md"
 requires-python = ">=3.12"

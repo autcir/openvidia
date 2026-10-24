@@ -2,11 +2,11 @@
 
 ![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-blue?logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow)
-[![CI](https://github.com/ciroautuori/openvidia/actions/workflows/ci.yml/badge.svg)](https://github.com/ciroautuori/openvidia/actions/workflows/ci.yml)
+[![CI](https://github.com/autcir/openvidia/actions/workflows/ci.yml/badge.svg)](https://github.com/autcir/openvidia/actions/workflows/ci.yml)
 ![Ruff](https://img.shields.io/badge/Ruff-passed-261230?logo=ruff&logoColor=white)
-![Stars](https://img.shields.io/github/stars/ciroautuori/openvidia?style=social)
-![Last Commit](https://img.shields.io/github/last-commit/ciroautuori/openvidia)
-![Version](https://img.shields.io/badge/version-2.1.0-green)
+![Stars](https://img.shields.io/github/stars/autcir/openvidia?style=social)
+![Last Commit](https://img.shields.io/github/last-commit/autcir/openvidia)
+[![Release](https://img.shields.io/github/v/release/autcir/openvidia)](https://github.com/autcir/openvidia/releases)
 
 **Multi-key proxy for NVIDIA NIM with a native desktop dashboard.**
 
@@ -25,7 +25,7 @@ Built for [opencode](https://opencode.ai), [Codex CLI](https://github.com/openai
 ### Linux (Arch / Ubuntu / Fedora)
 
 ```bash
-git clone https://github.com/ciroautuori/openvidia.git
+git clone https://github.com/autcir/openvidia.git
 cd openvidia
 ./install.sh
 ```
@@ -53,7 +53,7 @@ openvidia
 
 ```bash
 brew install python@3.12 pygobject pkg-config
-git clone https://github.com/ciroautuori/openvidia.git
+git clone https://github.com/autcir/openvidia.git
 cd openvidia
 pip install -e .
 openvidia setup
@@ -66,7 +66,7 @@ openvidia
 ### Windows
 
 ```cmd
-git clone https://github.com/ciroautuori/openvidia.git
+git clone https://github.com/autcir/openvidia.git
 cd openvidia
 pip install -e .
 openvidia setup
@@ -590,8 +590,9 @@ provider retires it, and it silently overrides what you picked.
 ### Slow models
 
 A `read` timeout is the wait for the **first byte**, and a reasoning model
-emits nothing at all while it thinks. Measured on the NVIDIA free tier, the
-same key, within the same minute:
+emits nothing at all while it thinks. Measured on the NVIDIA free tier in
+July 2026, the same key, within the same minute (these models have since been
+retired; the pattern still holds for their successors):
 
 | Model | Time to first token |
 |-------|---------------------|
