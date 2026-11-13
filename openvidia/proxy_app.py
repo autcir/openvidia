@@ -17,6 +17,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 from . import config
 from .anthropic_shim import handle_anthropic_messages
+from .catalog import BuildCatalog
 from .config import UPSTREAM_BASE
 from .embedding_cache import EmbeddingCache
 from .provider_fallback import load_provider_configs, try_fallback
@@ -324,6 +325,7 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
     )
     router = EndpointRouter(config.upstream_endpoints())
     emb_cache = EmbeddingCache()
+    build_catalog = BuildCatalog()
     _redis_url = config.redis_url()
     rs = RedisSync(_redis_url) if _redis_url else None
     if rs is not None:
@@ -445,6 +447,13 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
                         router.mark_success(endpoint + "models")
                         data = resp.json()
                         await resp.aclose()
+                        if isinstance(data.get("data"), list):
+                            data["data"], data["catalog"] = await build_catalog.enrich(
+                                client, data["data"]
+                            )
+                            # Rebuild the compatibility list from the same
+                            # enriched source rather than leave divergent lists.
+                            data.pop("models", None)
                         # Keep both keys: "data" (OpenAI standard, used by
                         # Codex) and "models" (used by other clients).
                         if "data" in data and "models" not in data:

@@ -89,7 +89,7 @@ test('invalid catalog does not destroy a previous successful result', async () =
 test('retired active model and favorites remain visible but cannot be selected or probed', async () => {
   let calls = 0
   const d = dashboard(async url => { if (url === '/v1/models') { calls++; return reply({data:[{id:'vendor/live'}]}) }; return reply({model:'vendor/retired'}) })
-  d.run("activeModel = 'vendor/retired'; presets = ['vendor/retired']")
+  d.run("activeModel = 'vendor/retired'; presets = ['vendor/retired']; modelFilter = 'starred'")
   await d.run('fetchModels()')
   assert.match(d.nodes.get('activeModelDisplay').textContent, /unavailable/)
   const item = d.nodes.get('modelList').children[0]
@@ -135,4 +135,46 @@ test('refreshes do not overlap while the provider is slow', async () => {
   resolveFetch(reply({data:[]}))
   await first
   assert.equal(d.run('catalogFetchPending'), false)
+})
+
+test('Recent defaults to official dated free chat API models, preserving date order', () => {
+  const d = dashboard(async () => reply({}))
+  assert.equal(d.run('modelFilter'), 'recent')
+  d.run(`allModels = [
+    {id:'vendor/old',catalog:{endpoint_kind:'free_chat',updated_at:'2026-10-01T00:00:00Z'}},
+    {id:'vendor/new',catalog:{endpoint_kind:'free_chat',updated_at:'2026-11-13T00:00:00Z'}},
+    {id:'vendor/legacy'},
+    {id:'vendor/embedding',catalog:{endpoint_kind:'other',updated_at:'2026-11-14T00:00:00Z'}},
+    {id:'vendor/undated',catalog:{endpoint_kind:'free_chat',updated_at:'not-a-date'}},
+    {id:'openvidia',catalog:{endpoint_kind:'free_chat',updated_at:'2026-11-14T00:00:00Z'}}
+  ]; activeModel = 'vendor/old'`)
+  assert.equal(d.run('getFilteredModels().map(m => m.id).join()'), 'vendor/new,vendor/old')
+  d.run("modelFilter = 'all'")
+  assert.equal(d.run('getFilteredModels().length'), 6)
+})
+
+test('Recent renders official names, exact IDs, dates and use cases as text', async () => {
+  const model = {id:'vendor/current', catalog:{endpoint_kind:'free_chat',updated_at:'2026-11-13T12:00:00Z',display_name:'Current <Model>',use_cases:['Agentic coding','Tool use']}}
+  const d = dashboard(async url => url === '/v1/models' ? reply({data:[model],catalog:{refreshed_at:'2026-11-13T12:30:00Z',stale:false}}) : reply({model:'vendor/other'}))
+  await d.run('fetchModels()')
+  const info = d.nodes.get('modelList').children[0].children[0]
+  assert.equal(info.children[0].textContent, 'Current <Model>')
+  assert.equal(info.children[1].textContent, 'vendor/current')
+  assert.equal(info.children[2].textContent, 'Updated 2026-11-13')
+  assert.equal(info.children[3].textContent, 'Agentic coding · Tool use')
+  assert.match(d.nodes.get('catalogInfo').textContent, /not benchmark strength/)
+  d.nodes.get('modelSearch').value = 'agentic'
+  assert.equal(d.run('getFilteredModels().length'), 1)
+  assert.equal(d.run('activeModel'), 'vendor/other')
+})
+
+test('Recent exposes metadata outages and keeps full API catalog accessible', async () => {
+  const d = dashboard(async url => url === '/v1/models' ? reply({data:[{id:'vendor/legacy'}],catalog:{stale:true,matched_models:0}}) : reply({}))
+  await d.run('fetchModels()')
+  assert.equal(d.run('getFilteredModels().length'), 0)
+  assert.match(d.nodes.get('catalogInfo').textContent, /metadata is unavailable/)
+  d.run("modelFilter = 'all'")
+  assert.equal(d.run('getFilteredModels()[0].id'), 'vendor/legacy')
+  d.run("allModels = [{id:'vendor/current',catalog:{endpoint_kind:'free_chat',updated_at:'2026-11-13T00:00:00Z'}}]; renderCatalogStatus()")
+  assert.match(d.nodes.get('catalogInfo').textContent, /Metadata is stale/)
 })

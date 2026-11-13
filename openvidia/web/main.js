@@ -4,7 +4,7 @@ let activeModel = ''
 let allModels = []
 let presets = []
 let _logEntries = 0
-let modelFilter = 'starred'
+let modelFilter = 'recent'
 let keyFilter = 'active'
 let _lastKeyStats = null
 
@@ -13,6 +13,7 @@ let catalogLoaded = false
 let catalogRefreshedAt = null
 let catalogError = ''
 let catalogFetchPending = false
+let catalogMetadata = {}
 
 const $ = id => document.getElementById(id)
 
@@ -282,10 +283,14 @@ async function setFallback(mode) {
 }
 
 /* ── Models browser ──────────────────────────── */
-const FILTERS = ['starred', 'all', 'verified']
+const FILTERS = ['recent', 'starred', 'all', 'verified']
 function getFilteredModels() {
   let list
-  if (modelFilter === 'starred') {
+  if (modelFilter === 'recent') {
+    // Official update dates measure recency, never relative model strength.
+    list = allModels.filter(m => m.id !== 'openvidia' && m.catalog?.endpoint_kind === 'free_chat' && Number.isFinite(Date.parse(m.catalog.updated_at)))
+      .sort((a, b) => Date.parse(b.catalog.updated_at) - Date.parse(a.catalog.updated_at) || a.id.localeCompare(b.id))
+  } else if (modelFilter === 'starred') {
     // in the order they were starred
     list = presets.map(id => allModels.find(m => m.id === id) || { id, owned_by: '', unavailable: catalogLoaded })
   } else if (modelFilter === 'verified') {
@@ -296,9 +301,9 @@ function getFilteredModels() {
     list = [...allModels]
   }
   const q = ($('modelSearch').value || '').toLowerCase()
-  if (q) list = list.filter(m => m.id.toLowerCase().includes(q))
-  // active model pinned to the top under any filter
-  if (activeModel) {
+  if (q) list = list.filter(m => [m.id, m.catalog?.display_name || '', ...(Array.isArray(m.catalog?.use_cases) ? m.catalog.use_cases : [])].some(value => String(value).toLowerCase().includes(q)))
+  // Keep Recent strictly ordered by official date; the header shows the active model.
+  if (activeModel && modelFilter !== 'recent') {
     const i = list.findIndex(m => m.id === activeModel)
     if (i > 0) { const [a] = list.splice(i, 1); list.unshift(a) }
   }
@@ -310,7 +315,8 @@ function renderFilters() {
   FILTERS.forEach(f => {
     const b = document.createElement('button')
     b.className = `browser-filter ${f === modelFilter ? 'active' : ''}`
-    if (f === 'starred') b.innerHTML = `★ Starred <span class="filter-count">${presets.length}</span>`
+    if (f === 'recent') { b.textContent = 'Recent'; b.title = 'Recent free chat API models from NVIDIA Build, ordered by official update date; recency is not a quality ranking' }
+    else if (f === 'starred') b.innerHTML = `★ Starred <span class="filter-count">${presets.length}</span>`
     else if (f === 'verified') { b.textContent = 'Answered'; b.title = 'Models with successful traffic through this proxy; capabilities still depend on the model' }
     else b.textContent = 'All'
     b.onclick = () => { modelFilter = f; renderFilters(); renderModelList() }
@@ -327,6 +333,12 @@ function renderCatalogStatus() {
   status.textContent = catalogError
     ? `${freshness} — refresh failed; showing the last successful catalog. ${catalogError}`
     : `${freshness}${absent ? ' — choose another active model; it is no longer listed.' : ''}`
+  const count = allModels.filter(m => m.id !== 'openvidia' && m.catalog?.endpoint_kind === 'free_chat' && Number.isFinite(Date.parse(m.catalog.updated_at))).length
+  const officialTime = Date.parse(catalogMetadata.refreshed_at)
+  $('catalogInfo').textContent = count
+    ? `Recent: ${count} free chat API models from NVIDIA Build’s latest page. Ordered by update date, not benchmark strength.${Number.isFinite(officialTime) ? ' Metadata checked ' + new Date(officialTime).toLocaleString() + '.' : ''}${catalogMetadata.stale ? ' Metadata is stale; showing the last successful refresh.' : ''} All contains the full API catalog.`
+    : 'Recent metadata is unavailable. Open All for the complete API catalog; previews without API access are not selectable.'
+  $('catalogInfo').className = `catalog-status${catalogMetadata.stale || !count ? ' warn' : ''}`
 }
 
 async function fetchModels() {
@@ -341,6 +353,7 @@ async function fetchModels() {
     const models = d.data || d.models
     if (!Array.isArray(models) || models.some(m => !m || typeof m.id !== 'string')) throw new Error('Invalid model catalog')
     allModels = models.map(m => ({ ...m, owned_by: m.owned_by || '', health: m.health || null }))
+    catalogMetadata = d.catalog && typeof d.catalog === 'object' ? d.catalog : {}
     catalogLoaded = true
     catalogRefreshedAt = new Date()
     catalogError = ''
@@ -377,7 +390,9 @@ function renderModelList() {
   const f = getFilteredModels()
   $('modelCount').textContent = `${f.length} / ${allModels.length}`
   if (!f.length) {
-    const hint = modelFilter === 'starred'
+    const hint = modelFilter === 'recent'
+      ? 'No recent API models with official metadata. Open All to browse the complete catalog.'
+      : modelFilter === 'starred'
       ? 'No starred models — tap ☆ on any model in All'
       : modelFilter === 'verified' ? 'No observed responses yet — send a request through the proxy. Answered means observed success, not a capability guarantee.' : 'No models found'
     $('modelList').innerHTML = `<div class="browser-empty">${hint}</div>`
@@ -390,8 +405,28 @@ function renderModelList() {
     // m.id / m.owned_by / m.health come straight from the upstream /v1/models
     // response (enriched by the proxy with ModelHealth). Remote data never
     // becomes markup.
-    const nm = document.createElement('span'); nm.className = 'browser-name'; nm.textContent = m.id
-    item.appendChild(nm)
+    const info = document.createElement('div'); info.className = 'browser-info'
+    const officialName = typeof m.catalog?.display_name === 'string' ? m.catalog.display_name : ''
+    const nm = document.createElement('span'); nm.className = 'browser-name'; nm.textContent = officialName || m.id
+    info.appendChild(nm)
+    if (officialName && officialName !== m.id) {
+      const id = document.createElement('span'); id.className = 'browser-id'; id.textContent = m.id
+      info.appendChild(id)
+    }
+    const updated = Date.parse(m.catalog?.updated_at)
+    if (Number.isFinite(updated)) {
+      const date = document.createElement('span'); date.className = 'browser-date'
+      date.textContent = `Updated ${new Date(updated).toISOString().slice(0, 10)}`
+      date.title = 'Official NVIDIA Build update date; not a benchmark or release-date guarantee'
+      info.appendChild(date)
+    }
+    if (Array.isArray(m.catalog?.use_cases) && m.catalog.use_cases.length) {
+      const tags = document.createElement('span'); tags.className = 'browser-use-cases'
+      tags.textContent = m.catalog.use_cases.slice(0, 3).join(' · ')
+      tags.title = m.catalog.use_cases.join(' · ')
+      info.appendChild(tags)
+    }
+    item.appendChild(info)
     if (m.unavailable) {
       const badge = document.createElement('span'); badge.className = 'health-badge health-bad'; badge.textContent = 'not listed'; item.appendChild(badge)
       item.title = 'Absent from the current catalog. Remove this favorite or wait for a refresh.'

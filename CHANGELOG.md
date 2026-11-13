@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Write configuration on platforms without Unix fchmod.
 
 ### Added
+- Default Recent model picker using official Build modification dates and exact inference API intersections; preserve the complete catalog under All.
 - Headless base installation and optional desktop dependencies.
 - Verified isolated release installation, atomic activation, rollback, and opt-in daily update checks.
 - Independent health/readiness routes, isolated real-process lifecycle tests, and a resumeless duration-audited soak monitor.

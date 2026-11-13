@@ -822,3 +822,20 @@ workflow runs the suite and resolves desktop dependencies on Linux, Windows and
 macOS when GitHub-hosted runners are available. NVIDIA quotas, shared worker
 availability and the selected model remain external dependencies; adding keys
 cannot guarantee unlimited throughput or continuous free service.
+
+
+### Recent models in the desktop picker
+
+The default **Recent** view matches the latest NVIDIA Build page against IDs
+actually returned by the inference API, then sorts by the official catalog
+modification date. It shows official display names and use-case tags while
+keeping the exact API ID searchable. This is recency metadata, not a benchmark
+ranking or a claim that a larger/newer model is better at your task.
+
+The complete inference catalog, including older and specialized models, remains
+under **All**. Build metadata is cached for one hour with a bounded fetch and
+last-good stale fallback. If the optional metadata cannot be loaded, the picker
+clearly points to All. Its scope is the latest Build page, not every model
+NVIDIA has ever published. Preview/playground-only names absent from the API are
+never added as selectable models merely because a website labels them Free
+Endpoint. Catalog metadata refresh never changes your active model.
