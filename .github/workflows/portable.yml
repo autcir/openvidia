@@ -1,0 +1,31 @@
+name: Portable compatibility
+
+# Explicitly opt in: hosted runners currently require account billing to be
+# restored. Never report Linux-only testing as Windows/macOS certification.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.12", "3.14"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - run: uv sync --frozen --python "${{ matrix.python }}"
+      - run: uv run pytest tests/ -q
+      - run: node --test tests/dashboard.test.cjs
+      - run: uv build --wheel
+      - name: Desktop dependencies resolve
+        run: uv sync --frozen --extra desktop --python "${{ matrix.python }}"

@@ -29,15 +29,19 @@ class ProxyServer:
         self._servers = servers
         self._tasks = tasks
         self.state = state
+        self.restart_requested = asyncio.Event()
+
+    @property
+    def tasks(self) -> list[asyncio.Task]:
+        return list(self._tasks)
 
     async def shutdown(self):
-        for s in self._servers:
-            s.should_exit = True
-        for t in self._tasks:
-            try:
-                await asyncio.wait_for(t, timeout=2.0)
-            except (TimeoutError, asyncio.CancelledError):
-                t.cancel()
+        for server in self._servers:
+            server.should_exit = True
+        done, pending = await asyncio.wait(self._tasks, timeout=12.0)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*done, *pending, return_exceptions=True)
 
 
 def _bind(family: int, host: str, port: int) -> socket_mod.socket | None:
@@ -68,6 +72,8 @@ async def start(
     if initial_model:
         state.active_model = initial_model
     app = create_app(state, web_dir=web_dir)
+    restart_requested = asyncio.Event()
+    app.state.request_restart = restart_requested.set
 
     # Bind explicitly first (like Rust's TcpListener::bind) so a host with
     # IPv6 off just skips that stack instead of taking the whole proxy down.
@@ -83,13 +89,17 @@ async def start(
     if v6_sock is not None:
         socks.append(v6_sock)
 
-    v4_config = uvicorn.Config(app, log_level="warning", lifespan="on")
+    v4_config = uvicorn.Config(
+        app, log_level="warning", lifespan="on", timeout_graceful_shutdown=10.0
+    )
     v4_server = uvicorn.Server(v4_config)
     servers.append(v4_server)
     tasks.append(asyncio.create_task(v4_server.serve(sockets=[v4_sock])))
 
     if v6_sock is not None:
-        v6_config = uvicorn.Config(app, log_level="warning", lifespan="off")
+        v6_config = uvicorn.Config(
+            app, log_level="warning", lifespan="off", timeout_graceful_shutdown=10.0
+        )
         v6_server = uvicorn.Server(v6_config)
         servers.append(v6_server)
         tasks.append(asyncio.create_task(v6_server.serve(sockets=[v6_sock])))
@@ -103,4 +113,6 @@ async def start(
             s.close()
         raise RuntimeError(f"proxy failed to start on :{port}")
 
-    return ProxyServer(servers, tasks, state)
+    proxy = ProxyServer(servers, tasks, state)
+    proxy.restart_requested = restart_requested
+    return proxy

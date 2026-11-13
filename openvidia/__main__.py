@@ -28,89 +28,35 @@ from .server_manager import start
 # ---------------------------------------------------------------------------
 # Configuration — entrypoint constants
 # ---------------------------------------------------------------------------
-PORT = 1919
+PORT = int(os.environ.get("OPENVIDIA_PORT", "1919"))
+if not 1 <= PORT <= 65535:
+    raise ValueError("OPENVIDIA_PORT must be between 1 and 65535")
 ENV_VAR = "OPENVIDIA_API_KEY"
 ENV_VAL = "ignored"
 _tray_ref = None  # Global tray reference (anti-GC)
 _tray_hide = None  # Global hide-function reference for close-to-tray
 
 
-def _port_listeners(port: int) -> list:
-    """Processes currently LISTENing on ``port`` (never includes ourselves)."""
-    try:
-        import psutil
-    except ImportError:
-        return []
-    me = os.getpid()
-    out = {}
-    try:
-        conns = psutil.net_connections(kind="inet")
-    except (psutil.AccessDenied, OSError):
-        return []
-    for conn in conns:
-        try:
-            if (
-                conn.laddr
-                and conn.laddr.port == port
-                and conn.status == "LISTEN"
-                and conn.pid
-                and conn.pid != me
-            ):
-                out[conn.pid] = psutil.Process(conn.pid)
-        except (psutil.NoSuchProcess, psutil.AccessDenied, AttributeError):
-            continue
-    return list(out.values())
-
-
-def _kill_stale_port(port: int, *, grace: float = 6.0, hard: float = 4.0) -> bool:
-    """Free ``port``, escalating SIGTERM → SIGKILL. Returns True if it is free.
-
-    SIGTERM alone is not enough: uvicorn shuts down gracefully, and an agent
-    CLI holding an open SSE stream keeps it alive indefinitely. The previous
-    version sent SIGTERM, waited 3s, then returned silently either way — so
-    the new instance started next to a survivor that still owned the port,
-    and every request kept being served by the OLD code.
-    """
-    import time as _time
+def _proxy_is_serving(port: int) -> bool:
+    """Identify OpenVidia by its HTTP health response, never by an open port."""
+    import urllib.request
 
     try:
-        import psutil
-    except ImportError:
-        return True
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1.0) as response:
+            data = json.load(response)
+        return data.get("service") == "openvidia" and data.get("port") == port
+    except (OSError, ValueError, AttributeError):
+        return False
 
-    procs = _port_listeners(port)
-    if not procs:
-        return True
 
-    names = ", ".join(f"{p.name()}({p.pid})" for p in procs)
-    for p in procs:
-        try:
-            p.terminate()
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
-    _gone, alive = psutil.wait_procs(procs, timeout=grace)
-    if alive:
-        for p in alive:
-            try:
-                p.kill()  # SIGKILL — it ignored the polite request
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-        psutil.wait_procs(alive, timeout=hard)
+def _port_is_open(port: int) -> bool:
+    import socket
 
-    # The socket can outlive the process briefly; wait for it to be released.
-    deadline = _time.monotonic() + hard
-    while _time.monotonic() < deadline:
-        if not _port_listeners(port):
-            print(f"● Freed port {port} (was: {names})", flush=True)
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
             return True
-        _time.sleep(0.1)
-
-    print(
-        f"✗ Port {port} is STILL held by {', '.join(f'{p.name()}({p.pid})' for p in _port_listeners(port))} "
-        f"— refusing to start a second instance on top of it",
-        flush=True,
-    )
-    return False
+    except OSError:
+        return False
 
 
 def _setup_opencode():
@@ -479,12 +425,8 @@ def _setup_cmd():
 
 async def main_async():
     """Foreground entrypoint: start the proxy on the event loop."""
-    if not _kill_stale_port(PORT):
-        # Starting anyway would leave the OLD process serving every request
-        # while this one silently fails to bind — the hardest class of bug to
-        # diagnose, because the code on disk is not the code answering.
-        print(f"  Free it manually:  fuser -k {PORT}/tcp", flush=True)
-        sys.exit(1)
+    if _port_is_open(PORT):
+        raise SystemExit(f"Port {PORT} is already in use; the existing process was left untouched")
     # Deliberately no _setup_*() here. Starting a proxy is not consent to
     # rewrite four other tools' configuration files.
     repaired = config.harden_config_permissions()
@@ -512,52 +454,39 @@ async def main_async():
         initial_model=saved_model,
     )
     srv.state.log_cb(f"● OpenVidia running on :{PORT} ({len(keys)} keys)")
+    from .updater import schedule_update_check
 
-    # foreground = logs only, no UI
+    schedule_update_check()
+
+    # A restart replaces this process after its sockets and streams drain.
+    # Keeping the PID avoids a second instance racing systemd's supervisor.
+    restart_wait = asyncio.create_task(srv.restart_requested.wait())
+    restart = False
     try:
-        while True:
-            await asyncio.sleep(3600)
-    except asyncio.CancelledError:
-        pass
+        await asyncio.wait([restart_wait, *srv.tasks], return_when=asyncio.FIRST_COMPLETED)
+        restart = restart_wait.done() and restart_wait.result()
     finally:
-        if srv:
-            await srv.shutdown()
+        restart_wait.cancel()
+        await asyncio.gather(restart_wait, return_exceptions=True)
+        await srv.shutdown()
+    if restart:
+        os.execv(sys.executable, [sys.executable, "-m", "openvidia", "foreground"])
 
 
 def _wait_until_serving(port: int, child=None, timeout: float = 20.0) -> bool:
-    """Block until the proxy answers on ``port``; report why if it never does."""
-    import socket
+    """Wait for OpenVidia HTTP health, not merely a listening socket."""
     import time as _time
 
     deadline = _time.monotonic() + timeout
     while _time.monotonic() < deadline:
+        if _proxy_is_serving(port):
+            return True
         if child is not None and child.poll() is not None:
-            print(
-                f"✗ Proxy exited during startup (code {child.returncode}). "
-                f"Run `openvidia foreground` to see the error.",
-                flush=True,
-            )
+            print(f"Proxy exited during startup (code {child.returncode})", flush=True)
             return False
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
-                return True
-        except OSError:
-            _time.sleep(0.2)
-    print(f"✗ Proxy did not start listening on :{port} within {timeout:.0f}s", flush=True)
+        _time.sleep(0.2)
+    print(f"OpenVidia did not become healthy on :{port} within {timeout:.0f}s", flush=True)
     return False
-
-
-def _kill_proxy_by_port(port: int) -> None:
-    """Kill the process listening on the port — used by the tray Quit action.
-
-    Shares the SIGTERM→SIGKILL escalation with startup: a polite terminate
-    alone leaves the proxy alive whenever a client is holding a stream open,
-    so "Quit" looked like it worked while the port stayed busy.
-    """
-    try:
-        _kill_stale_port(port)
-    except Exception:  # noqa: BLE001 — Quit must never raise
-        pass
 
 
 def _make_signaller(icon_path, window, port):
@@ -652,8 +581,8 @@ def _create_tray(icon_path: str, window, port: int):
 
     menu.addSeparator()
 
-    quit_action = QAction("Quit")
-    quit_action.triggered.connect(lambda: (_kill_proxy_by_port(port), app.quit()))
+    quit_action = QAction("Close dashboard")
+    quit_action.triggered.connect(app.quit)
     menu.addAction(quit_action)
 
     tray.setContextMenu(menu)
@@ -694,7 +623,7 @@ def open_desk(port: int) -> None:
     url = f"http://localhost:{port}/?token={config.control_token()}"
     assets = Path(__file__).resolve().parent / "web" / "assets"
     icon_path = str(assets / "logo.png")
-    print(f"● Desktop window → {url}", flush=True)
+    print(f"● Desktop window → http://localhost:{port}/", flush=True)
 
     window = webview.create_window(
         "OpenVidia",
@@ -716,6 +645,8 @@ def open_desk(port: int) -> None:
 
     def on_closing():
         """Close-to-tray: hide the window, do NOT kill the proxy."""
+        if _tray_hide is None:
+            return True
         try:
             h = _tray_hide
             if h is not None:
@@ -726,17 +657,8 @@ def open_desk(port: int) -> None:
             pass
         return False
 
-    window.events.closing += on_closing
-    # NOTE: no killer on `closed` here. With a tray icon the window is a view
-    # onto a background service — closing it hides the view, and the proxy
-    # must keep serving the CLIs. Only the tray's Quit stops it. (This line
-    # used to kill the proxy and appeared harmless purely because the kill was
-    # SIGTERM-only and uvicorn ignored it while streams were open; once the
-    # kill was made to actually work, closing the window took the proxy down
-    # with it.) The no-tray fallback below registers its own handler, because
-    # without a tray there is nothing left to stop it from.
-
     if signaller is not None:
+        window.events.closing += on_closing
         webview.start(
             func=_tray_waiter_factory(signaller, window),
             gui=gui,
@@ -744,13 +666,7 @@ def open_desk(port: int) -> None:
             icon=icon_path,
         )
     else:
-        # Fallback: no tray, close = kill proxy
-        def kill_proxy():
-            _kill_proxy_by_port(port)
-            print("● Desk closed — proxy terminated", flush=True)
-
-        window.events.closing -= on_closing
-        window.events.closed += kill_proxy
+        # No tray: closing the view exits only the UI; the proxy is independent.
         webview.start(gui=gui, debug=False, icon=icon_path)
 
 
@@ -758,6 +674,7 @@ USAGE = f"""OpenVidia — multi-key proxy for NVIDIA NIM
 
   openvidia                    start the proxy and open the dashboard
   openvidia foreground         start the proxy in this terminal (logs to stdout)
+  openvidia update <action>    check, install or roll back a verified update
   openvidia setup              configure opencode + Jcode to use the proxy (backs up first)
   openvidia run <cli> [args]   run another CLI against the proxy, changing no files
   openvidia --help             this message
@@ -791,6 +708,10 @@ def main():
             return
         if cmd == "run":
             sys.exit(_run_cmd(sys.argv[2:]) or 0)
+        if cmd == "update":
+            from .updater import main as update_main
+
+            sys.exit(update_main(sys.argv[2:]) or 0)
         if cmd == "foreground":
             asyncio.run(main_async())
             return
@@ -802,24 +723,25 @@ def main():
 
     import subprocess as _sp
 
-    if not _kill_stale_port(PORT):
-        print(f"  Free it manually:  fuser -k {PORT}/tcp", flush=True)
-        sys.exit(1)
+    if not _proxy_is_serving(PORT):
+        if _port_is_open(PORT):
+            print(f"Port {PORT} belongs to another or unhealthy service; it was left untouched")
+            sys.exit(1)
+        options = (
+            {"start_new_session": True}
+            if sys.platform != "win32"
+            else {"creationflags": _sp.CREATE_NEW_PROCESS_GROUP | _sp.DETACHED_PROCESS}
+        )
+        child = _sp.Popen(
+            [sys.executable, "-m", "openvidia", "foreground"],
+            stdout=_sp.DEVNULL,
+            stderr=_sp.DEVNULL,
+            stdin=_sp.DEVNULL,
+            **options,
+        )
+        if not _wait_until_serving(PORT, child, timeout=20.0):
+            sys.exit(1)
 
-    child = _sp.Popen(
-        [sys.executable, "-m", "openvidia", "foreground"],
-        stdout=_sp.DEVNULL,
-        stderr=_sp.DEVNULL,
-        stdin=_sp.DEVNULL,
-    )
-
-    # Wait for the server to actually answer before opening the window.
-    # A fixed sleep(3) hid every startup failure: the window opened onto a
-    # dead port, or onto a survivor still running the previous build.
-    if not _wait_until_serving(PORT, child, timeout=20.0):
-        sys.exit(1)
-
-    # Desk app — compact native window
     open_desk(PORT)
 
 

@@ -1,198 +1,86 @@
 # Contributing to OpenVidia
 
-Thank you for considering contributing to OpenVidia! This guide will help you get started.
+The canonical repository is [autcir/openvidia](https://github.com/autcir/openvidia).
+Fork it, create a branch and submit a pull request against `main`.
 
-## 🚀 Quick Start
+## Development setup
 
-1. **Fork** the repository
-2. **Clone** your fork: `git clone https://github.com/YOUR_USERNAME/openvidia.git`
-3. **Create a branch**: `git checkout -b feature/your-feature-name`
-4. **Install dependencies**: `pip install -e .`
-5. **Make your changes**
-6. **Run tests**: `pytest tests/`
-7. **Commit and push**: `git push origin feature/your-feature-name`
-8. **Open a Pull Request**
-
-## 📋 Code Style
-
-- Follow **PEP 8** guidelines
-- Use **type hints** for function signatures
-- Write **docstrings** for public functions and classes
-- Keep functions focused and small (<50 lines ideally)
-- Use meaningful variable names
-
-### Example
-
-```python
-def is_key_healthy(self, key: str) -> bool:
-    """Check if a key is healthy (valid and not on cooldown).
-    
-    Args:
-        key: The API key to check.
-        
-    Returns:
-        True if the key is valid and not on cooldown, False otherwise.
-    """
-    ks = self._key_states.get(key)
-    if ks and not ks.is_valid:
-        return False
-    return not self.is_key_on_cooldown(key)
-```
-
-## 🤖 Model presets
-
-NVIDIA adds and retires NIM models every few weeks, and this is the easiest
-place to help. Per-model tuning lives in `_MODEL_OPTIONS_DEFAULTS["per_model"]`
-in `openvidia/config.py`; the dashboard "Popular" list is `POPULAR_MODELS` in
-`openvidia/web/main.js`.
-
-- Use the id exactly as `GET https://integrate.api.nvidia.com/v1/models`
-  returns it (no key needed).
-- Only measured settings: in the PR, give the time to first token with and
-  without the preset, or link the model card it comes from.
-- The `Model catalog` workflow fails when a shipped id is retired. A PR that
-  removes or replaces it is always welcome.
-
-## 🧪 Testing
-
-### Running Tests
+Python 3.12 or newer and Node.js are required for the complete local checks.
+The base installation is headless; native window dependencies are optional.
 
 ```bash
-# Run all tests
-pytest tests/
-
-# Run specific test file
-pytest tests/test_proxy.py
-
-# Run with coverage
-pytest tests/ --cov=openvidia
-
-# Run specific test class
-pytest tests/test_proxy.py::TestKeyState
+uv sync --frozen
+uv run pre-commit install
+uv run pytest tests/ -q
+node --test tests/dashboard.test.cjs
+uv run ruff check openvidia/ tests/ scripts/
+uv run ruff format --check openvidia/ tests/ scripts/
 ```
 
-### Writing Tests
+For manual desktop work, use `uv sync --frozen --extra desktop` and `uv run
+openvidia`. For server operation use `uv run openvidia foreground`. Do not
+run the installer merely to execute tests: it may configure local clients or
+install a desktop entry/service.
 
-- Place tests in the `tests/` directory
-- Name test files `test_*.py`
-- Use descriptive test names: `test_<function>_<scenario>_<expected_result>`
-- Test edge cases and error conditions
-- Mock external dependencies (HTTP calls, file system)
+`openvidia setup` configures OpenCode and Jcode. `openvidia run codex` and
+`openvidia run claude` set environment variables for one process without
+persistent client configuration edits. Closing the dashboard must leave an
+independently running proxy available.
 
-Example:
+## Changes and tests
 
-```python
-def test_mark_key_failed_sets_cooldown(self, proxy_state):
-    """Test marking a key failed sets cooldown."""
-    key = proxy_state.keys[0]
-    
-    proxy_state.mark_key_failed(key, status=429)
-    
-    assert proxy_state.is_key_on_cooldown(key) is True
-    assert "429" in proxy_state.cooldown_reason(key)
-```
+Use English throughout the repository and Conventional Commit subjects such
+as `fix: preserve model selection when the server rejects a change`.
+Ruff enforces formatting and lint rules from `pyproject.toml`. Prefer focused
+functions, useful types and explanations of non-obvious behavior.
 
-## 📝 Commit Messages
+Place Python regressions in `tests/test_*.py`; dashboard behavior tests live
+in `tests/dashboard.test.cjs`. Exercise outcomes and failure paths rather
+than checking implementation text. Mock provider traffic and keep user
+configuration isolated. Never include real credentials in fixtures or logs.
 
-Everything in the repository is in English: code, comments, docstrings,
-docs, commit messages, PR titles and descriptions. Commits before 2.2.0 have
-some Italian messages; the history is kept as is so existing clones stay valid.
-
-Follow [Conventional Commits](https://www.conventionalcommits.org/):
-
-- `feat:` New feature
-- `fix:` Bug fix
-- `docs:` Documentation changes
-- `style:` Code style changes (formatting, etc.)
-- `refactor:` Code refactoring
-- `test:` Adding or updating tests
-- `chore:` Maintenance tasks
-
-Examples:
+Live catalog checks are separate from the offline test suite:
 
 ```bash
-feat: add adaptive RPM backoff on 429 responses
-fix: handle httpx 0.28 timeout parameter change
-docs: update README with installation instructions
-test: add unit tests for proxy rotation logic
+uv run python -m scripts.check_catalog
 ```
 
-## 🔀 Pull Request Process
+That command contacts NVIDIA and writes `catalog-report.json`. Operational
+probes can consume provider quota; use explicit duration/request limits and
+record actual results. Passing a short test is not evidence of H24 uptime.
 
-1. **Update documentation** if you change behavior
-2. **Add tests** for new features
-3. **Ensure all tests pass**: `pytest tests/`
-4. **Update CHANGELOG.md** with your changes
-5. **Request review** from maintainers
+## Model discovery and tuning
 
-### PR Checklist
+`GET /v1/models` supplies selectable API IDs. `openvidia/catalog.py` annotates
+only their exact intersection with official NVIDIA Build metadata; preview
+cards without API access must not become selectable. The dashboard's Recent
+view follows official update dates; All keeps the complete API catalog and
+Answered reflects observed traffic. There is no frozen Popular model list.
 
-- [ ] Tests added/updated
-- [ ] Documentation updated
-- [ ] CHANGELOG.md updated
-- [ ] No linting errors
-- [ ] Description of changes included
+Per-model options belong in `_MODEL_OPTIONS_DEFAULTS["per_model"]` in
+`openvidia/config.py`. Include measurements or an official model-card source
+for tuning changes. Do not infer tool compatibility or relative model quality
+from an ID, model size, update date or successful catalog listing.
 
-## 🐛 Reporting Issues
+## CI and review
 
-Before opening an issue:
+CI tests Python 3.12/3.14 on a persistent self-hosted Linux runner. For safety,
+external-fork PR jobs are skipped there. A maintainer must review the changes
+and arrange isolated validation; approval alone does not override that job
+condition. The manual portable workflow defines additional operating-system
+checks, but platform support claims need successful run evidence.
 
-1. Check existing issues (open and closed)
-2. Try the latest version
-3. Gather information:
-   - OS and Python version
-   - OpenVidia version
-   - Error messages and logs
-   - Steps to reproduce
+Include the problem, resulting behavior, relevant checks and remaining limits
+in the PR. Update behavior documentation and the changelog when appropriate.
+Keep release publication, main-branch deployment and changes to user machines
+explicitly separate. See [automation](../docs/automation.md) and
+[updates](../docs/updates.md) for operational details.
 
-Use the issue template when creating a new issue.
+## Issues and security
 
-## 💡 Feature Requests
+For ordinary bugs, include the version/commit, OS, reproduction steps and
+redacted error output. Use the available issue templates. Report security
+issues privately using [SECURITY.md](../SECURITY.md), not public issues.
 
-Feature requests are welcome! Please:
-
-1. Check if the feature already exists or is planned
-2. Describe the use case clearly
-3. Explain why this feature would be valuable
-4. Provide examples of how it should work
-
-## 🔒 Security
-
-If you find a security vulnerability:
-
-1. **Do not** open a public issue
-2. Email: [your-email@example.com] (or use GitHub Security Advisories)
-3. Include details about the vulnerability
-4. Allow reasonable time for a fix before disclosure
-
-See [SECURITY.md](SECURITY.md) for more details.
-
-## 📚 Resources
-
-- [README.md](README.md) - Project overview
-- [pyproject.toml](pyproject.toml) - Dependencies and configuration
-- [openvidia/](openvidia/) - Source code
-
-## 💬 Questions?
-
-- Open an issue with the "Question" template
-- Check existing discussions on GitHub
-- Read the documentation
-
----
-
-**Thank you for contributing to OpenVidia!** 🎉
-
-Every contribution, no matter how small, helps make this project better.
-
-## Before you commit
-
-```bash
-uv sync                    # installs dev tooling too
-uv run pre-commit install  # once: hooks run on every commit
-uv run pytest              # the suite is fast, run it
-```
-
-`ruff check` and `ruff format --check` gate every pull request, so the hook
-saves you a round trip. Style is automated on purpose — review time is for
-behaviour, not whitespace.
+Further references: [README](../README.md), [AGENTS.md](../AGENTS.md),
+[pyproject.toml](../pyproject.toml) and [source](../openvidia/).

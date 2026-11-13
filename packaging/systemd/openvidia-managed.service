@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenVidia managed local NVIDIA proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust this path if XDG_DATA_HOME differs from its default.
+ExecStart=%h/.local/share/openvidia-managed/openvidia-managed foreground
+Environment=OPENVIDIA_HTTP2=0
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+UMask=0077
+
+[Install]
+WantedBy=default.target

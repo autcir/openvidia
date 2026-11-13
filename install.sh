@@ -4,6 +4,24 @@ set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
 
+MODE=desktop
+START=1
+SERVICE=0
+for arg in "$@"; do
+    case "$arg" in
+        --headless) MODE=headless ;;
+        --desktop) MODE=desktop ;;
+        --no-start) START=0 ;;
+        --service) SERVICE=1 ;;
+        --help|-h)
+            echo 'Usage: ./install.sh [--desktop|--headless] [--service] [--no-start]'
+            exit 0 ;;
+        *) echo "Unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
+EXTRAS=()
+if [[ "$MODE" == desktop ]]; then EXTRAS=(--extra desktop); fi
+
 echo "╔════════════════════════════════════════════╗"
 echo "║   OpenVidia — Automatic Installer          ║"
 echo "╚════════════════════════════════════════════╝"
@@ -14,18 +32,19 @@ echo "▶ Installing Python dependencies..."
 # Whatever installs the dependencies also has to run the app: uv puts them in a
 # local venv, so the system python3 would start with nothing importable.
 if command -v uv >/dev/null 2>&1; then
-    uv sync --quiet
+    uv sync --frozen --no-dev --quiet "${EXTRAS[@]}"
     # Absolute paths, resolved now. A desktop entry is launched by the DE with
     # a minimal PATH that usually excludes ~/.local/bin, where uv installs
     # itself — so a launcher that says `uv` finds nothing, exits, and the user
     # sees an icon that does nothing at all.
-    UV_BIN="$(command -v uv)"
-    RUN=("$UV_BIN" run openvidia)
+    RUN=("$DIR/.venv/bin/openvidia")
     echo "  ✓ Dependencies installed (uv)"
-elif command -v pip >/dev/null 2>&1; then
-    pip install -e . --quiet
-    PY_BIN="$(command -v python3)"
-    RUN=("$PY_BIN" -m openvidia)
+elif command -v python3 >/dev/null 2>&1; then
+    python3 -m venv .venv
+    PACKAGE=.
+    if [[ "$MODE" == desktop ]]; then PACKAGE='.[desktop]'; fi
+    .venv/bin/python -m pip install -e "$PACKAGE" --quiet
+    RUN=("$DIR/.venv/bin/openvidia")
     echo "  ✓ Dependencies installed (pip)"
 else
     echo "  ✗ You need to install uv (recommended) or pip before continuing"
@@ -42,7 +61,7 @@ echo "▶ Configuring opencode..."
 echo ""
 
 # ── 3. Desktop integration (Linux only) ────────
-if [[ "$(uname -s)" == "Linux" ]]; then
+if [[ "$MODE" == desktop && "$(uname -s)" == "Linux" ]]; then
     echo "▶ Installing desktop entry..."
     DESKTOP_DIR="$HOME/.local/share/applications"
     ICON_DIR="$HOME/.local/share/icons/hicolor/256x256/apps"
@@ -89,14 +108,58 @@ if [[ "$(uname -s)" == "Linux" ]]; then
     echo ""
 fi
 
+# A persistent service is explicit, so desktop installs do not change login policy.
+if [[ "$SERVICE" == 1 ]]; then
+    if [[ "$(uname -s)" != Linux ]] || ! command -v systemctl >/dev/null 2>&1; then
+        echo '--service requires Linux with a systemd user session' >&2
+        exit 2
+    fi
+    UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+    mkdir -p "$UNIT_DIR"
+    if [[ -f "$UNIT_DIR/openvidia.service" ]]; then
+        cp "$UNIT_DIR/openvidia.service" "$UNIT_DIR/openvidia.service.bak.$(date +%s)"
+    fi
+    {
+        echo '[Unit]'
+        echo 'Description=OpenVidia local NVIDIA proxy'
+        echo 'After=network-online.target'
+        echo '[Service]'
+        echo 'Type=simple'
+        printf 'ExecStart="%s" foreground\n' "${RUN[0]}"
+        echo 'Environment=OPENVIDIA_HTTP2=0'
+        echo 'Restart=always'
+        echo 'RestartSec=5'
+        echo 'TimeoutStopSec=15'
+        echo 'UMask=0077'
+        echo '[Install]'
+        echo 'WantedBy=default.target'
+    } > "$UNIT_DIR/openvidia.service"
+    systemctl --user daemon-reload
+    if [[ "$START" == 1 ]]; then
+        systemctl --user enable --now openvidia.service
+    else
+        systemctl --user enable openvidia.service
+    fi
+fi
+if [[ "$START" == 0 ]]; then
+    echo "Installed ($MODE). Start with: ${RUN[*]} foreground"
+    exit 0
+fi
+
 # ── 4. Start and verify ─────────────────────────
 echo "▶ Starting proxy + desktop app..."
 # No pkill: it matches by pattern (so it can hit unrelated processes), it does
 # not catch the launcher wrapper, and it never checks whether anything died.
-# The app frees port 1919 itself on startup, escalating if the previous
-# instance ignores the polite request.
-nohup "${RUN[@]}" > /dev/null 2>&1 &
-LAUNCHER=$!
+# Desktop launch attaches to an existing healthy service when present.
+if [[ "$SERVICE" == 1 ]]; then
+    LAUNCHER=""
+elif [[ "$MODE" == headless ]]; then
+    nohup "${RUN[@]}" foreground > /dev/null 2>&1 &
+    LAUNCHER=$!
+else
+    nohup "${RUN[@]}" > /dev/null 2>&1 &
+    LAUNCHER=$!
+fi
 
 # Poll instead of sleeping. Startup pre-warms every key, which takes tens of
 # seconds on a large pool — a fixed `sleep 3` reported failure on a perfectly
@@ -110,7 +173,7 @@ while [ $SECONDS -lt $DEADLINE ]; do
         READY=1
         break
     fi
-    if ! kill -0 "$LAUNCHER" 2>/dev/null; then
+    if [[ -n "$LAUNCHER" ]] && ! kill -0 "$LAUNCHER" 2>/dev/null; then
         break   # launcher exited — no point waiting out the deadline
     fi
     sleep 1
@@ -119,7 +182,7 @@ done
 if [ -n "$READY" ]; then
     KEYS=$(curl -fsS --max-time 5 http://localhost:1919/health | python3 -c "import sys,json; print(json.load(sys.stdin).get('keys','?'))" 2>/dev/null || echo "?")
     echo "  ✓ Proxy active — $KEYS keys on http://localhost:1919"
-    echo "  ✓ Desktop app opened"
+    if [[ "$MODE" == desktop && "$SERVICE" == 0 ]]; then echo "  ✓ Desktop app opened"; fi
 else
     echo "  ✗ Proxy did not come up. See the error with:"
     echo "      ${RUN[*]} foreground"

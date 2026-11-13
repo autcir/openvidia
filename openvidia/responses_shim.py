@@ -408,10 +408,15 @@ async def _rotation_phase(
                     f"  {log_tag}: HTTP {err_status} gateway timeout — key[{idx}] 30s cooldown"
                 )
                 state.mark_key_failed(k, status=err_status, retry_after=30)
-                attempts -= 1  # Don't burn budget on a model-level timeout
+                # Gateway failures still spend the bounded attempt budget.
+                # Refunding these let a large pool amplify one outage into
+                # dozens of slow requests before fallback could run.
                 continue
             state.mark_key_failed(
-                k, status=err_status, error_body=error_body if error_body else None
+                k,
+                status=err_status,
+                error_body=error_body if error_body else None,
+                retry_after=resp.headers.get("retry-after"),
             )
     return None, None, None
 

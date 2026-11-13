@@ -11,11 +11,19 @@ on:
     types: [completed]
     branches: [main]
 
+concurrency:
+  group: deploy-soliso
+  cancel-in-progress: false
+
 jobs:
   deploy:
     name: Update & Restart
     runs-on: [self-hosted, soliso, autcir, openvidia]
-    if: github.event.workflow_run.conclusion == 'success'
+    timeout-minutes: 15
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
 
     steps:
       # soliso runs the proxy as an editable install out of
@@ -42,7 +50,8 @@ jobs:
       # runner's non-login shell does not set.
       - name: Restart the proxy
         run: |
-          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export XDG_RUNTIME_DIR
           systemctl --user restart openvidia.service
           systemctl --user is-active --quiet openvidia.service
 
@@ -51,7 +60,7 @@ jobs:
       # looks active for a moment — wait for the port to actually answer.
       - name: Verify it is serving
         run: |
-          for i in $(seq 1 20); do
+          for _ in $(seq 1 20); do
             if curl -fsS -o /dev/null -m 5 "http://localhost:1919/api/status" \
                -H "x-openvidia-token: $(cat ~/.config/openvidia/control_token)"; then
               echo "proxy is serving"

@@ -18,6 +18,8 @@ Pool multiple free-tier API keys behind one endpoint. Automatic rotation, per-ke
 
 Built for [opencode](https://opencode.ai), [Codex CLI](https://github.com/openai/codex), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Grok](https://x.ai), [Jcode](https://github.com/1jehuang/jcode), and any OpenAI-compatible client.
 
+**Live evidence (13 Nov 2026):** three recent models completed real OpenCode file-tool tests; four of six API protocol cycles passed, with documented timeouts and a returned-model identity caveat. See the [dated validation report](docs/validation-results/2026-11-13.md) and [reproducible opt-in validator](docs/validation.md). The 72-hour run is still in progress.
+
 ---
 
 ## Quick Start
@@ -36,15 +38,15 @@ Or manually:
 # Install uv (recommended) — https://astral.sh/uv
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-uv sync                          # install dependencies
-uv run openvidia setup           # auto-configure opencode
-uv run openvidia                 # start proxy + desktop app
+uv sync --frozen --extra desktop  # install desktop dependencies
+uv run --extra desktop openvidia setup  # configure opencode
+uv run --extra desktop openvidia        # reuse/start proxy + desktop app
 ```
 
 With pip:
 
 ```bash
-pip install -e .
+pip install -e '.[desktop]'
 openvidia setup
 openvidia
 ```
@@ -52,23 +54,23 @@ openvidia
 ### macOS
 
 ```bash
-brew install python@3.12 pygobject pkg-config
+brew install python@3.12
 git clone https://github.com/autcir/openvidia.git
 cd openvidia
-pip install -e .
+pip install -e '.[desktop]'
 openvidia setup
 openvidia
 ```
 
 > pywebview on macOS uses system WebKit (native, no extra deps).
-> If you hit a GTK build error, install `pygobject` via Homebrew or just skip it — macOS doesn't need it.
+> GTK/PyGObject is not required for the native macOS backend.
 
 ### Windows
 
 ```cmd
 git clone https://github.com/autcir/openvidia.git
 cd openvidia
-pip install -e .
+pip install -e ".[desktop]"
 openvidia setup
 openvidia
 ```
@@ -116,19 +118,19 @@ openvidia
 
 ## Why?
 
-NVIDIA's free NIM tier limits each API key to ~40 RPM. Aggressive bursts trigger a **penalty box** that can lock keys for hours. OpenVidia:
+NVIDIA rate limits and shared worker availability vary by model and account. Bursts can trigger cooldowns; adding keys cannot bypass a shared account limit. OpenVidia:
 
 - **Pools multiple keys** behind a single endpoint
-- **Rotates automatically** on 429/401/403/5xx — zero manual intervention
+- **Rotates automatically** on eligible key/provider errors, with bounded attempts and explicit failure when the pool cannot serve the request
 - **Per-key cooldown timers** — on real 429s, trusts `Retry-After` exactly (no multiplication); distinguishes transient worker saturation (`ResourceExhausted`) from true RPM limits and never burns key cooldowns for the former
 - **Network-error circuit breaker** — `ConnectTimeout`/`ConnectError` don't trigger key cooldown (the key is fine). After 3 consecutive network errors across different keys, rotation stops entirely and returns 503 (the network is down, no key can help)
-- **504 model timeouts don't burn keys** — gateway timeouts cool the key for 30s but don't consume the attempt budget, since the model (not the key) is the bottleneck
-- **Sliding-window RPM limiting** — keeps each key under 28 RPM (safe margin below 40); the ceiling self-tunes down from real `Retry-After` headers, so the pool never spends its full budget against a tighter upstream limit
+- **Bounded gateway retries** — gateway failures cool the key for 30s and spend the attempt budget so a large pool cannot amplify an outage indefinitely
+- **Sliding-window RPM limiting** — starts with a 28 RPM per-key ceiling and adapts downward from `Retry-After`; account-level throttling still takes precedence
 - **Health checks** — revives keys whose cooldowns have expired, but skips 401/403 invalid keys (dead keys stay dead)
-- **No silent model substitution** — the model you select is the model that answers; if it fails on every key you are told so, never handed output from a different model
-- **Auto-compaction** — summarizes long histories so requests never fail on context overflow ([details](#auto-compaction))
+- **Explicit routing policy** — the requested model is forwarded to NVIDIA; model/provider failover requires explicit configuration. Provider-reported model identity can differ and is recorded separately by the live validator.
+- **Auto-compaction** — summarizes or trims long histories to reduce context-overflow failures ([details](#auto-compaction))
 - **Per-key × per-model scoring** — rotation is ordered by a composite score (success rate + median time to first token) learned per key and per model from live traffic: the best key for the requested model goes first
-- **Multi-endpoint routing** — extra NVIDIA endpoints (`endpoints.json` or `OPENVIDIA_UPSTREAM_ENDPOINTS`), a 60s blacklist on ≥500 errors, automatic recovery
+- **Multi-endpoint routing** — extra NVIDIA endpoints (`endpoints.json` or `OPENVIDIA_UPSTREAM_ENDPOINTS`), a 60s blacklist on eligible endpoint errors (model-specific 504 timeouts do not blacklist the shared host), automatic recovery
 - **Multi-node sync via Redis (opt-in)** — cooldowns, invalid keys, pool throttling and model circuit breakers shared across instances ([details](#resilience--scale))
 - **Embedding cache** — `/v1/embeddings` hits are served from memory (TTL 300s) without touching upstream quota
 - **Free-tier provider fallback** — when every NVIDIA key is exhausted, requests fail over to OpenAI-compatible providers declared in `providers.json` ([details](#resilience--scale))
@@ -142,22 +144,22 @@ NVIDIA's free NIM tier limits each API key to ~40 RPM. Aggressive bursts trigger
 |---------|-------------|
 | `openvidia` | Start proxy in background + open desktop app |
 | `openvidia foreground` | Foreground mode (logs to stdout, no UI) |
-| `openvidia setup` | Auto-configure detected CLIs: opencode, Codex, Grok (Claude Code requires manual env vars) |
+| `openvidia setup` | Configure opencode and Jcode; other clients use `openvidia run <cli>` |
 
 ---
 
 ## CLI Setup Guides
 
-> **TL;DR — run `openvidia setup` once.** It auto-detects and configures every CLI you have installed. You only need to read the manual steps below if something doesn't work or you prefer to configure things yourself.
+> **TL;DR — run `openvidia setup` once.** It configures opencode and Jcode. Use `openvidia run <cli>` for process-scoped configuration of other clients. You only need to read the manual steps below if something doesn't work or you prefer to configure things yourself.
 
 Supported clients:
 
 | CLI | Protocol | Endpoint | Auto-setup |
 |-----|----------|----------|------------|
 | **opencode** | OpenAI-compatible | `http://localhost:1919/v1` | ✅ `openvidia setup` |
-| **Codex CLI** | OpenAI Responses API | `http://localhost:1919/v1` | ✅ `openvidia setup` |
+| **Codex CLI** | OpenAI Responses API | `http://localhost:1919/v1` | `openvidia run codex` |
 | **Claude Code** | Anthropic Messages API | `http://localhost:1919` | ❌ manual env vars |
-| **Grok (xAI)** | OpenAI-compatible | `http://localhost:1919/v1` | ✅ `openvidia setup` |
+| **Grok (xAI)** | OpenAI-compatible | `http://localhost:1919/v1` | `openvidia run grok` |
 | **Jcode** | OpenAI-compatible | `http://localhost:1919/v1` | ✅ `openvidia setup` |
 
 ---
@@ -165,7 +167,7 @@ Supported clients:
 ### opencode
 
 ```bash
-openvidia setup    # configures provider + model + compaction + instructions
+openvidia setup    # configures provider + model + default compaction
 opencode           # then /model openvidia
 ```
 
@@ -231,7 +233,7 @@ claude --model openvidia
 
 > The `/v1/messages` endpoint translates Anthropic Messages format ↔ NVIDIA chat/completions bidirectionally — streaming, tool use, and system prompts all work.
 >
-> **Images:** NVIDIA NIM models are text-only. Image blocks (e.g. screenshots) are replaced with `[image omitted: model has no vision]` so the model stays aware of the context and logs a warning in the Activity panel.
+> **Images:** This Anthropic compatibility shim currently replaces image blocks with text placeholders and logs a warning. NVIDIA also serves vision models; this shim limitation must not be interpreted as a provider-wide lack of vision support.
 
 ---
 
@@ -313,7 +315,7 @@ curl http://localhost:1919/v1/chat/completions \
   -d '{"model":"openvidia","messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
-Streaming (SSE) is fully supported — tokens flow through unbuffered.
+Streaming (SSE) responses flow incrementally; model and client protocol capabilities must still be tested.
 
 ---
 
@@ -357,13 +359,13 @@ Request arrives
     │   │                   → network error? 0.5s pause, key untouched (3 consecutive → stop)
     │   └─ (max 5 sends per pass, 3 passes with 1s pause between)
     │
-    └─ All candidates exhausted? → 503 naming the model (never a substitute model)
+    └─ All candidates exhausted? → an explicit error, or a separately configured provider fallback
 ```
 
 ### Health Check
 
 Every 60 seconds:
-1. Finds keys still on cooldown (skips 401/403 invalid keys — they're dead, not temporarily rate-limited)
+1. Finds keys still on cooldown (skips 401/403 invalid keys and unexpired 429 rate-limit cooldowns)
 2. Sends a lightweight `GET /v1/models` probe
 3. If the key responds OK — clears the cooldown (revived)
 4. If still failing — leaves the cooldown in place
@@ -372,7 +374,7 @@ Every 60 seconds:
 
 ## Auto-Compaction
 
-Long conversations eventually exceed the model's context window. Without handling, the upstream returns a `400`, and — since that error is identical on every key — a naive proxy would burn through the whole pool before dying. **OpenVidia never blocks on context overflow.**
+Long conversations eventually exceed the model's context window. Without handling, the upstream returns a `400`, and — since that error is identical on every key — a naive proxy would burn through the whole pool before dying. **Compaction reduces overflow risk; provider limits can still reject a request.**
 
 Before forwarding a request, if the estimated history exceeds a token budget, OpenVidia compacts it:
 
@@ -531,7 +533,7 @@ not something you can see from the outside — the socket just sits there.
 
 Three buttons next to the active model in the dashboard: `auto` (send nothing,
 let the model decide), `on`, `off`. The setting is per-model and stored
-server-side, so all four CLIs pick it up without touching their own configs.
+server-side, so supported request paths apply it without editing client configs.
 
 The **parameter name is configuration, not code**. Providers spell this flag
 differently and rename it every model generation, so `model_options.json`
@@ -555,10 +557,10 @@ has made an explicit choice and wins.
 
 ### Context windows are learned, not configured
 
-A model the proxy has never seen must reach full context with **zero**
-configuration — providers add models continuously, and a hand-maintained
-budget table means every new model runs silently truncated until someone
-notices.
+New models use a conservative context budget until an explicit override or a
+provider overflow rejection supplies a learned limit. This avoids relying on a
+hand-maintained table, but it does not establish the full context capacity in
+advance.
 
 NVIDIA does not advertise the window on `/v1/models`, but it states it exactly
 when a request exceeds it:
@@ -568,13 +570,13 @@ This model's maximum context length is 202752 tokens.
 However, your messages resulted in 320011 tokens.
 ```
 
-So the proxy asks once, in the background, caches the answer in
-`model_limits.json`, and also harvests it from any real overflow. Precedence:
+The proxy learns the limit from a real overflow rejection and caches the answer in
+`model_limits.json`. It does not send oversized speculative probes. Precedence:
 your `model_budgets` override → learned → the conservative default. An unknown
-model is never allowed to overflow while it is being learned.
+model uses the conservative default until the provider supplies a learned limit.
 
-The day your provider ships a new flagship, you select it and it runs at full
-context. Nothing to configure.
+New models appear in the live catalog. Their actual context and tool compatibility
+must be learned or tested; listing a model does not certify its capabilities.
 
 ---
 
@@ -623,7 +625,7 @@ will not silently answer from a different one.
 Constants in `openvidia/proxy_state.py`:
 
 ```python
-MAX_RPM = 28              # Safe margin below NVIDIA's 40 RPM limit
+MAX_RPM = 28              # Initial local ceiling; provider quotas can be lower
 RPM_WINDOW = 60.0         # Sliding window in seconds
 
 COOLDOWN_DURATIONS = {
@@ -734,8 +736,8 @@ scale across machines.
 
 - **Multi-endpoint routing** — by default requests go to
   `integrate.api.nvidia.com`; add endpoints via `endpoints.json` or
-  `OPENVIDIA_UPSTREAM_ENDPOINTS` (comma-separated). A status ≥500 blacklists an
-  endpoint for 60s; a success revives it. Deterministic client errors never
+  `OPENVIDIA_UPSTREAM_ENDPOINTS` (comma-separated). Eligible endpoint failures blacklist an
+  endpoint for 60s; model-specific 504 latency does not. A success revives it. Deterministic client errors never
   retry on another endpoint.
 - **Multi-node sync (Redis, opt-in)** — one proxy per machine, shared state:
   cooldowns, invalid keys, pool throttling and model circuit breakers propagate
@@ -785,4 +787,57 @@ MIT
 
 ---
 
-Built by [Ciro Autuori](https://github.com/ciroautuori).
+Built by [Ciro Autuori](https://github.com/autcir).
+
+
+## Reliable operation and updates
+
+For an unattended Linux service, install with `./install.sh --headless --service`.
+For a desktop plus managed service, use `./install.sh --desktop --service`.
+The desktop reuses an existing OpenVidia process. Closing the window or choosing
+Quit closes the dashboard only; it does not terminate the proxy. An unrelated
+process on the configured port is never terminated automatically.
+
+The model browser refreshes the live catalog every 60 seconds and keeps its last
+successful catalog during network failures, with visible freshness/error status.
+**Answered** means a model has successfully responded in this proxy process;
+it does not certify tool use, vision or a context limit. Retired favorites remain
+visible as unavailable. Changing a model or reasoning setting is confirmed by
+the authenticated server before the interface reports success.
+
+`/health` identifies the running proxy independently of desktop assets. `/ready`
+reports whether it is enabled and has an eligible key; it is
+not a successful-inference guarantee. Real streaming and tool roundtrips are
+checked by the long-duration monitor in `python -m openvidia.soak --help`.
+
+Application updates are separate from catalog updates. See
+[verified release installation and rollback](docs/updates.md). Checks are opt-in;
+updates do not replace dependencies inside a running environment or restart an
+active conversation. Provider fallback is also opt-in via `providers.json` and
+currently applies to Chat Completions (OpenCode), including incremental SSE and
+tool messages. Responses/Messages protocol shims do not promise cross-provider
+failover. A partially emitted response is never replayed on another provider.
+
+The automated Linux tests and local smoke checks do not establish 24/7 uptime or
+Windows/macOS support on every machine. The manual Portable compatibility
+workflow runs the suite and resolves desktop dependencies on Linux, Windows and
+macOS when GitHub-hosted runners are available. NVIDIA quotas, shared worker
+availability and the selected model remain external dependencies; adding keys
+cannot guarantee unlimited throughput or continuous free service.
+
+
+### Recent models in the desktop picker
+
+The default **Recent** view matches the latest NVIDIA Build page against IDs
+actually returned by the inference API, then sorts by the official catalog
+modification date. It shows official display names and use-case tags while
+keeping the exact API ID searchable. This is recency metadata, not a benchmark
+ranking or a claim that a larger/newer model is better at your task.
+
+The complete inference catalog, including older and specialized models, remains
+under **All**. Build metadata is cached for one hour with a bounded fetch and
+last-good stale fallback. If the optional metadata cannot be loaded, the picker
+clearly points to All. Its scope is the latest Build page, not every model
+NVIDIA has ever published. Preview/playground-only names absent from the API are
+never added as selectable models merely because a website labels them Free
+Endpoint. Catalog metadata refresh never changes your active model.

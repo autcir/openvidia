@@ -1,96 +1,106 @@
-# OpenVidia — Multi-key proxy for NVIDIA NIM
+# OpenVidia — multi-key proxy for NVIDIA NIM
 
-## Mission
-Multi-key proxy for NVIDIA NIM with a native desktop dashboard. A pool of free-tier API keys behind a single endpoint, with automatic rotation, per-key cooldown, sliding-window RPM limiting, and auto-compaction.
+## Scope and architecture
 
----
+OpenVidia runs a local OpenAI-compatible endpoint for remote NVIDIA-hosted
+models, with optional provider failover and a desktop dashboard. It does not
+provide offline inference or guarantee uninterrupted provider availability.
 
-## Architecture
-
-```
-Client CLI → localhost:1919/v1 → Proxy Engine → integrate.api.nvidia.com/v1
-                                    │
-                                    ├─ /v1/chat/completions  (catch-all: opencode, Grok, any OpenAI client)
-                                    ├─ /v1/responses         (shim: Codex CLI)
-                                    ├─ /v1/messages          (shim: Claude Code)
-                                    └─ /v1/models            (upstream model list)
+```text
+Client → localhost:1919/v1 → proxy → NVIDIA NIM
+                            ├─ chat/completions: OpenCode and OpenAI-compatible clients
+                            ├─ responses: Codex adapter
+                            ├─ messages: Claude Code adapter
+                            └─ models: live API catalog plus official Build metadata
 ```
 
-### Core modules
+| Module | Responsibility |
+|---|---|
+| `proxy_app.py` | Routing, authenticated control plane, health, streaming provider failover |
+| `proxy_state.py` | Key load, cooldowns, RPM limits, per-model health and circuits |
+| `responses_shim.py` | Responses adapter and shared bounded key rotation |
+| `anthropic_shim.py` | Messages adapter; feature support differs from native Anthropic APIs |
+| `compaction.py` | Context estimation, summarization and overflow handling |
+| `catalog.py` | Cached NVIDIA Build metadata intersected with live API model IDs |
+| `config.py` | Configuration paths, timeouts and model options |
+| `__main__.py` | CLI setup, foreground ownership, desktop view and tray |
+| `server_manager.py` | Loopback IPv4/IPv6 listeners and graceful lifecycle |
+| `webui.py` | Dashboard routes and persisted controls |
+| `updater.py` | Managed release checks, staged installation and rollback |
+| `soak.py` | Bounded operational probes and persistent reports |
+| `safe_file.py` | Atomic configuration writes and backups |
+| `_upstream_utils.py` | Shared upstream semaphore and worker-exhaustion detection |
 
-| File | Lines | Role |
-|------|-------|-------|
-| `proxy_app.py` | ~573 | FastAPI app factory, routing, health check, pre-warm |
-| `proxy_state.py` | ~730 | Thread-safe state: KeyState, cooldown, RPM tracker, circuit breaker |
-| `responses_shim.py` | ~1126 | Shim `/v1/responses` → `/v1/chat/completions` (Codex CLI) |
-| `anthropic_shim.py` | ~705 | Shim `/v1/messages` → `/v1/chat/completions` (Claude Code) |
-| `compaction.py` | ~784 | Context auto-compaction on context overflow |
-| `config.py` | ~351 | Cross-platform config paths, timeouts, model options |
-| `__main__.py` | ~727 | Entry point, CLI setup (opencode/codex/grok), tray, server manager |
-| `webui.py` | ~472 | Web dashboard (pywebview), API endpoints |
-| `server_manager.py` | 107 | uvicorn start/stop, dual-stack binding |
-| `safe_file.py` | 197 | Atomic backup of config files |
-| `_upstream_utils.py` | 43 | Global semaphore + ResourceExhausted detection |
+`_rotation_phase()` is shared by the chat route and protocol adapters. It
+separates request errors, key failures, shared-account throttling and worker
+exhaustion. Gateway failures spend the bounded attempt budget; worker
+exhaustion has its own retry bound. Keep timeout/rotation constants in their
+existing shared modules. Never replay tool calls after output has reached a
+client. Model availability, tool support and provider compatibility require
+actual evidence; catalog presence alone proves none of them.
 
-### Shared key rotation
-
-`_rotation_phase()` in `responses_shim.py` is the function shared by all paths:
-- max 5 attempts per phase, 3 phases with a 1s pause
-- saturation gate: if <5% of keys are live, fast-fail with 503
-- probe timeout (90s) on the first attempt for fast dead-model detection
-- send timeout (180s) on subsequent attempts
-- handles 429 ResourceExhausted (transient, key untouched) vs 429 rate-limit (cooldown)
-- imported by `proxy_app.py` (catch-all), `anthropic_shim.py` (Claude Code)
-
-### Unified constants
-
-- `_MAX_ROTATE_ATTEMPTS`, `_ROTATE_SEND_TIMEOUT`, `_MODEL_PROBE_TIMEOUT`, `_MIN_LIVE_FRACTION` → defined in `responses_shim.py`, imported everywhere
-- `UPSTREAM_BASE`, `UPSTREAM_CHAT` → defined in `config.py`, imported in `anthropic_shim.py`, `compaction.py`, `proxy_app.py`, `webui.py`
-
----
-
-## CLI setup
+## Installation and lifecycle
 
 ```bash
-openvidia setup    # configures opencode + Codex + Grok + Jcode automatically
-openvidia          # starts proxy + desktop dashboard
+./install.sh --desktop             # native view and source installation
+./install.sh --headless --service  # Linux systemd user service
+openvidia setup                   # persistent OpenCode and Jcode configuration
+openvidia                         # attach a dashboard or start an independent proxy
+openvidia foreground              # own the proxy in this terminal/service
+openvidia run codex               # process-local client environment; no config edits
+openvidia run claude
 ```
 
-Claude Code needs manual env vars (auto-setup is disabled so it does not modify the shell rc):
-```bash
-export ANTHROPIC_BASE_URL=http://localhost:1919
-export ANTHROPIC_API_KEY=ignored
-```
-
----
+The base Python package is headless; native GUI dependencies are the
+`desktop` extra (`uv sync --extra desktop` or `pip install '.[desktop]'`).
+Starting the application must not rewrite client configuration or terminate
+an existing listener. Closing/quitting the dashboard exits the view only;
+restart is requested through the authenticated process owner.
 
 ## Development
 
-English only: code, comments, docstrings, docs, commit messages and PRs.
+Use English for code, comments, docstrings, documentation, commits and PRs.
 
 ```bash
-pip install -e .
-pytest tests/ -v          # 303 tests
-ruff check openvidia/ tests/
-ruff format --check openvidia/ tests/
+uv sync --frozen
+uv run pytest tests/ -q
+node --test tests/dashboard.test.cjs
+uv run ruff check openvidia/ tests/ scripts/
+uv run ruff format --check openvidia/ tests/ scripts/
 ```
 
-### CI runner
+The test count changes with the suite; do not freeze it in contributor
+instructions. Tests must isolate user configuration and use mocked transports
+for upstream requests. Treat live API checks and long operational probes as
+separate validation with explicit limits and reports.
 
-Every workflow runs on the self-hosted runner `soliso-autcir-openvidia` on the
-soliso VPS, labels `[self-hosted, soliso, autcir, openvidia]`. GitHub-hosted
-runners are unavailable (the account is billing-locked). Pull requests from
-outside contributors need maintainer approval before any job runs.
+The dashboard defaults to **Recent**, ordered by official Build update dates
+for models in the live API catalog. **All** retains the full API catalog;
+**Answered** uses observed traffic. Do not hardcode changing model rankings
+or invent API IDs from preview cards. Build update dates are not benchmark
+scores or guaranteed release dates.
 
-### Config files (`~/.config/openvidia/`)
+## Automation
 
-| File | Purpose |
-|------|-------|
-| `keys.json` | API keys (JSON array) |
-| `presets.json` | Starred models (quick-switch) |
-| `active_model` | Active model (persists across restarts) |
-| `index` | Key rotation index |
-| `compaction.json` | Auto-compaction tuning (optional) |
-| `timeouts.json` | Upstream timeouts (optional) |
-| `model_limits.json` | Context windows learned by the proxy (do not edit by hand) |
-| `model_options.json` | Reasoning toggle + per-model payload |
+CI uses the self-hosted `soliso-autcir-openvidia` runner with labels
+`[self-hosted, soliso, autcir, openvidia]`, testing Python 3.12 and 3.14.
+External-fork PR jobs are skipped on this persistent runner; maintainers must
+review code and use an isolated environment before running untrusted changes.
+The manually dispatched portable workflow defines Linux/Windows/macOS jobs;
+its existence does not establish that those platforms passed.
+
+The catalog workflow checks shipped tuning daily. An independent monitor
+checks runner availability and missed scheduled runs; see
+[automation monitoring](docs/automation.md). See [managed updates](docs/updates.md)
+for opt-in update checks, staged installation and rollback. Do not claim that
+source checkouts, published releases and installed copies update together.
+
+## Local state
+
+Keys and administrative tokens live under the platform configuration directory
+(`~/.config/openvidia/` on Linux by default). Never commit them or include them
+in reports. Important files include `keys.json`, `control_token`, `presets.json`,
+`active_model`, `compaction.json`, `timeouts.json`, `model_limits.json`,
+`model_options.json`, and the optional `build-catalog.json` metadata cache.
+See [security policy](SECURITY.md) before changing access controls or exposing
+any endpoint beyond loopback.

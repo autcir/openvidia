@@ -87,13 +87,15 @@ def test_the_source_installer_replaces_both_exec_keys():
     assert "printf 'TryExec=%s\\n' \"$LAUNCHER\"" in install_sh
 
 
-def test_health_is_only_available_when_the_bundle_is():
-    """Documents the coupling that made the missing bundle so hard to see:
-    /health is registered by attach_webui, which is skipped when web_dir does
-    not exist — so the packaged proxy failed its own health check."""
-    import inspect
+def test_health_is_independent_of_the_dashboard_bundle():
+    from fastapi.testclient import TestClient
 
-    from openvidia import proxy_app, webui
+    from openvidia.proxy_app import create_app
+    from openvidia.proxy_state import ProxyState, ProxyStats
 
-    assert "/health" in inspect.getsource(webui.attach_webui)
-    assert "web_dir.exists()" in inspect.getsource(proxy_app.create_app)
+    app = create_app(ProxyState([], ProxyStats(), lambda _m: None), web_dir=None)
+    with TestClient(app) as client:
+        response = client.get("/health")
+        assert response.status_code == 200
+        assert response.json()["service"] == "openvidia"
+        assert client.get("/ready").status_code == 503

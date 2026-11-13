@@ -313,21 +313,23 @@ wheels = [
 
 [[package]]
 name = "openvidia"
-version = "2.2.0"
+version = "2.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "httpx", extra = ["http2"] },
     { name = "psutil" },
-    { name = "pyqt6", marker = "sys_platform == 'linux'" },
-    { name = "pyqt6-webengine", marker = "sys_platform == 'linux'" },
-    { name = "pywebview" },
-    { name = "qtpy", marker = "sys_platform == 'linux'" },
     { name = "tomlkit" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
 [package.optional-dependencies]
+desktop = [
+    { name = "pyqt6", marker = "sys_platform == 'linux'" },
+    { name = "pyqt6-webengine", marker = "sys_platform == 'linux'" },
+    { name = "pywebview" },
+    { name = "qtpy", marker = "sys_platform == 'linux'" },
+]
 redis = [
     { name = "redis" },
 ]
@@ -345,15 +347,15 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", extras = ["http2"], specifier = ">=0.27" },
     { name = "psutil", specifier = ">=6.0" },
-    { name = "pyqt6", marker = "sys_platform == 'linux'", specifier = ">=6.5" },
-    { name = "pyqt6-webengine", marker = "sys_platform == 'linux'", specifier = ">=6.5" },
-    { name = "pywebview", specifier = ">=5.0" },
-    { name = "qtpy", marker = "sys_platform == 'linux'", specifier = ">=2.4" },
+    { name = "pyqt6", marker = "sys_platform == 'linux' and extra == 'desktop'", specifier = ">=6.5" },
+    { name = "pyqt6-webengine", marker = "sys_platform == 'linux' and extra == 'desktop'", specifier = ">=6.5" },
+    { name = "pywebview", marker = "extra == 'desktop'", specifier = ">=5.0" },
+    { name = "qtpy", marker = "sys_platform == 'linux' and extra == 'desktop'", specifier = ">=2.4" },
     { name = "redis", marker = "extra == 'redis'", specifier = ">=5.0" },
     { name = "tomlkit", specifier = ">=0.13" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
-provides-extras = ["redis"]
+provides-extras = ["desktop", "redis"]
 
 [package.metadata.requires-dev]
 dev = [

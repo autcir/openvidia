@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 import threading
 import time
 import webbrowser
@@ -83,10 +82,6 @@ def attach_webui(app: FastAPI, state: ProxyState, web_dir: Path) -> None:
     # ----------------------------------------------------------------------- #
     # Health & status
     # ----------------------------------------------------------------------- #
-
-    @app.get("/health")
-    async def health() -> dict:
-        return {"status": "ok", "keys": len(state.keys), "port": state.port}
 
     @app.get("/api/status")
     async def api_status() -> dict:
@@ -390,26 +385,22 @@ def attach_webui(app: FastAPI, state: ProxyState, web_dir: Path) -> None:
         return {"ok": True, "status": "running"}
 
     @app.post("/api/restart")
-    async def api_restart() -> dict:
-        import os as _os
-        import signal as _signal
-        import subprocess as _sp
-
-        # Spawn the replacement process first, then kill the current one so
-        # there is no window where no proxy is listening. SIGKILL is POSIX
-        # only: on Windows os.kill maps SIGTERM to TerminateProcess anyway.
-        _kill_sig = _signal.SIGKILL if sys.platform != "win32" else _signal.SIGTERM
-
-        def _do_restart() -> None:
-            import time as _time
-
-            _time.sleep(0.3)
-            _sp.Popen([sys.executable, "-m", "openvidia"] + sys.argv[1:])
-            _time.sleep(0.5)
-            _os.kill(_os.getpid(), _kill_sig)
-
-        threading.Thread(target=_do_restart, daemon=True).start()
-        return {"ok": True, "restarting": True}
+    async def api_restart() -> Response:
+        request_restart = getattr(app.state, "request_restart", None)
+        if request_restart is None:
+            return Response(
+                content=json.dumps(
+                    {"ok": False, "error": "restart requires the foreground process owner"}
+                ),
+                media_type="application/json",
+                status_code=409,
+            )
+        # Return the acknowledgement before the owner drains the server.
+        asyncio.get_running_loop().call_later(0.2, request_restart)
+        return Response(
+            content=json.dumps({"ok": True, "restarting": True}),
+            media_type="application/json",
+        )
 
     # ----------------------------------------------------------------------- #
     # Model probe — fire a 5-token chat completion against upstream

@@ -17,6 +17,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 from . import config
 from .anthropic_shim import handle_anthropic_messages
+from .catalog import BuildCatalog
 from .config import UPSTREAM_BASE
 from .embedding_cache import EmbeddingCache
 from .provider_fallback import load_provider_configs, try_fallback
@@ -280,18 +281,22 @@ class LocalOnlyMiddleware(BaseHTTPMiddleware):
     every local client would need the token, and it hands out no secrets.
     """
 
-    def __init__(self, app, token: str):
+    def __init__(self, app, token: str, port: int = 1919):
         super().__init__(app)
         self._token = token
+        self._origins = {f"http://{host}:{port}" for host in ("localhost", "127.0.0.1", "[::1]")}
+        self._hosts = {"localhost", "127.0.0.1", "::1", "[::1]"} | {
+            f"{host}:{port}" for host in ("localhost", "127.0.0.1", "[::1]")
+        }
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         if path.startswith(GUARDED_PREFIXES):
             origin = request.headers.get("origin")
-            if origin is not None and origin not in LOCAL_ORIGINS:
+            if origin is not None and origin not in self._origins:
                 return JSONResponse({"error": "cross-origin request denied"}, status_code=403)
             host = (request.headers.get("host") or "").lower()
-            if host and host not in LOCAL_HOSTS:
+            if host and host not in self._hosts:
                 return JSONResponse({"error": "invalid host header"}, status_code=403)
 
             supplied = request.headers.get(TOKEN_HEADER) or request.query_params.get("token") or ""
@@ -320,6 +325,7 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
     )
     router = EndpointRouter(config.upstream_endpoints())
     emb_cache = EmbeddingCache()
+    build_catalog = BuildCatalog()
     _redis_url = config.redis_url()
     rs = RedisSync(_redis_url) if _redis_url else None
     if rs is not None:
@@ -351,17 +357,40 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
 
     app = FastAPI(lifespan=lifespan)
 
+    @app.get("/health")
+    async def health() -> dict:
+        """Process liveness is independent of the optional dashboard bundle."""
+        return {"service": "openvidia", "status": "ok", "keys": len(state.keys), "port": state.port}
+
+    @app.get("/ready")
+    async def ready() -> JSONResponse:
+        live_keys, valid_keys = state.count_live_candidates()
+        ready_now = state.running and live_keys > 0 and not state.is_pool_throttled()
+        return JSONResponse(
+            {
+                "service": "openvidia",
+                "ready": ready_now,
+                "running": state.running,
+                "healthy_keys": valid_keys,
+                "available_keys": live_keys,
+                "upstream": dict(state.upstream),
+            },
+            status_code=200 if ready_now else 503,
+        )
+
     # Not a wildcard. The dashboard is same-origin with the proxy, so it never
     # needs CORS at all; the only reason to answer any origin is to let a
     # foreign page read the response — which is exactly the thing to prevent
     # when one of the responses is the user's API keys.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=sorted(LOCAL_ORIGINS),
+        allow_origins=[
+            f"http://{host}:{state.port}" for host in ("localhost", "127.0.0.1", "[::1]")
+        ],
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.add_middleware(LocalOnlyMiddleware, token=config.control_token())
+    app.add_middleware(LocalOnlyMiddleware, token=config.control_token(), port=state.port)
     app.add_middleware(BodyLimitMiddleware)
 
     if web_dir and web_dir.exists():
@@ -406,7 +435,7 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
 
         # The alternative endpoints are fallbacks: try them in order until the
         # first one answers with the model list.
-        for endpoint in router.healthy_endpoints():
+        for endpoint in router.healthy_endpoints() or router.endpoints:
             for key in keys:
                 if not state.is_key_healthy(key) or not state.key_can_send_rpm(key):
                     continue
@@ -418,6 +447,13 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
                         router.mark_success(endpoint + "models")
                         data = resp.json()
                         await resp.aclose()
+                        if isinstance(data.get("data"), list):
+                            data["data"], data["catalog"] = await build_catalog.enrich(
+                                client, data["data"]
+                            )
+                            # Rebuild the compatibility list from the same
+                            # enriched source rather than leave divergent lists.
+                            data.pop("models", None)
                         # Keep both keys: "data" (OpenAI standard, used by
                         # Codex) and "models" (used by other clients).
                         if "data" in data and "models" not in data:
@@ -506,6 +542,46 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
         )
 
     # ── Catch-all proxy → NVIDIA NIM ──────────────────────────────────
+    async def provider_response(payload: dict, request: Request):
+        """Try explicitly configured providers before committing a response.
+
+        Once any output has reached the client, never retry: a tool call may
+        already have caused a side effect. Forward SSE incrementally rather
+        than buffering it and labelling it JSON.
+        """
+        streaming = bool(payload.get("stream"))
+        for provider in load_provider_configs():
+            response = await try_fallback(client, payload, provider, stream=streaming)
+            if response is None:
+                continue
+            state.log_cb(f"⇄ fallback → {provider.name}")
+            state.stats.success += 1
+            headers = {
+                "X-OpenVidia-Provider": provider.name,
+                "Content-Type": response.headers.get(
+                    "content-type", "text/event-stream" if streaming else "application/json"
+                ),
+            }
+            if not streaming:
+                try:
+                    return Response(content=await response.aread(), headers=headers)
+                finally:
+                    await response.aclose()
+
+            async def fallback_body(upstream=response):
+                try:
+                    async for chunk in upstream.aiter_bytes():
+                        if await request.is_disconnected():
+                            break
+                        yield chunk
+                except httpx.HTTPError:
+                    yield b'\ndata: {"error":"fallback stream interrupted"}\n\n'
+                finally:
+                    await upstream.aclose()
+
+            return StreamingResponse(fallback_body(), headers=headers)
+        return None
+
     @app.api_route(
         "/v1/{full_path:path}",
         methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -580,10 +656,16 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
 
         # ── Key rotation ──────────────────────────────────────────────
         async with state.lock:
-            candidates = state.get_candidate_keys()
+            candidates = state.get_candidate_keys(
+                payload.get("model", "") if isinstance(payload, dict) else ""
+            )
 
         if not candidates:
             state.log_cb("✗ No valid keys available")
+            if isinstance(payload, dict) and full_path.endswith("chat/completions"):
+                fallback_response = await provider_response(payload, request)
+                if fallback_response is not None:
+                    return fallback_response
             return JSONResponse({"error": "no valid keys available"}, status_code=503)
 
         # ── Circuit breaker: skip model if too many consecutive failures ──────
@@ -599,6 +681,10 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
             _fallback_mode = _per.get("fallback", _fallback_mode)
             if _fallback_mode == "off":
                 state.log_cb(f"🔴 {requested_model} circuit OPEN, fallback=off → 503")
+                if full_path.endswith("chat/completions"):
+                    fallback_response = await provider_response(payload, request)
+                    if fallback_response is not None:
+                        return fallback_response
                 return JSONResponse(
                     {"error": f"{requested_model} is down (circuit open), fallback disabled"},
                     status_code=503,
@@ -612,17 +698,24 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
             if fallback and isinstance(payload, dict):
                 state.log_cb(f"🔴 {requested_model} circuit OPEN → auto-failover to {fallback}")
                 payload["model"] = fallback
+                config.apply_model_options(payload)
                 body = json.dumps(payload).encode()
                 requested_model = fallback
+                async with state.lock:
+                    candidates = state.get_candidate_keys(fallback)
             else:
                 state.log_cb(f"🔴 {requested_model} circuit OPEN, no healthy fallback")
+                if full_path.endswith("chat/completions"):
+                    fallback_response = await provider_response(payload, request)
+                    if fallback_response is not None:
+                        return fallback_response
                 return JSONResponse(
                     {"error": f"{requested_model} is down (circuit open), no fallback available"},
                     status_code=503,
                 )
 
         nv_path = full_path[3:] if full_path.startswith("v1/") else full_path
-        endpoint_urls = router.healthy_endpoints() or [UPSTREAM_BASE]
+        endpoint_urls = router.healthy_endpoints() or router.endpoints
 
         CLIENT_FWD_HEADERS = {"content-type", "accept", "x-request-id", "x-trace-id"}
 
@@ -658,9 +751,9 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
                 h["Content-Type"] = "application/json"
             return h
 
-        # Multi-endpoint failover: try the first healthy endpoint; on a 5xx or
-        # a timeout the host is probably partially down, so blacklist it for
-        # ENDPOINT_RETRY_AFTER and move on to the next one. A deterministic
+        # Multi-endpoint failover: try the first healthy endpoint. Host errors
+        # temporarily blacklist it; a 504 is model latency, not proof that the
+        # shared host or its catalog is down. A deterministic
         # error (400/401/404) will not turn out differently on another host:
         # stop right away. An "exhausted" (budget spent) is NOT the host being
         # down: try the next one without blacklisting.
@@ -688,9 +781,10 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
             if resp is not None and resp.status_code == 200:
                 router.mark_success(url)
                 break
-            _endpoint_dead = (resp is not None and resp.status_code >= 500) or (
-                resp is None and (_outcome.get("status") or 0) >= 500
+            endpoint_status = (
+                resp.status_code if resp is not None else (_outcome.get("status") or 0)
             )
+            _endpoint_dead = endpoint_status >= 500 and endpoint_status != 504
             if _endpoint_dead and not _outcome.get("exhausted"):
                 router.mark_failure(url)
             if _outcome.get("deterministic"):
@@ -765,6 +859,11 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
                 status_code=last_status or 400,
             )
 
+        if isinstance(payload, dict) and full_path.endswith("chat/completions"):
+            fallback_response = await provider_response(payload, request)
+            if fallback_response is not None:
+                return fallback_response
+
         if state.is_pool_throttled():
             retry_in = int(state.pool_throttle_remaining()) + 1
             return JSONResponse(
@@ -778,20 +877,6 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
                 status_code=429,
                 headers={"Retry-After": str(retry_in)},
             )
-
-        # ── Provider free-tier fallback (opt-in via providers.json) ──
-        # Does not touch the NVIDIA keys (no record_key_usage: the success
-        # is not the pool's doing), but it counts as a served request.
-        if isinstance(payload, dict) and full_path.endswith("chat/completions"):
-            for provider in load_provider_configs():
-                fallback_resp = await try_fallback(client, payload, provider)
-                if fallback_resp is None:
-                    continue
-                state.log_cb(f"⇄ fallback → {provider.name}")
-                state.stats.success += 1
-                f_body = await fallback_resp.aread()
-                await fallback_resp.aclose()
-                return Response(content=f_body, media_type="application/json")
 
         msg = "all keys exhausted"
         if model_name:
