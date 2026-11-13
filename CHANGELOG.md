@@ -5,6 +5,23 @@ All notable changes to OpenVidia will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - Unreleased
+
+### Fixed
+- Authenticate dashboard setting changes and report rejected writes without false success.
+- Replace hardcoded model recommendations with observed responses from the live catalog; expose stale selections and refresh failures.
+- Reuse the managed proxy from the desktop and keep it running when the dashboard closes.
+- Restart the serving process after bounded draining without racing the supervisor.
+- Preserve incremental SSE and tool messages during explicitly configured Chat Completions provider failover.
+- Bound gateway retry attempts and honor upstream Retry-After in adaptive rate limiting.
+- Write configuration on platforms without Unix fchmod.
+
+### Added
+- Headless base installation and optional desktop dependencies.
+- Verified isolated release installation, atomic activation, rollback, and opt-in daily update checks.
+- Independent health/readiness routes, isolated real-process lifecycle tests, and a resumeless duration-audited soak monitor.
+- Daily live model tuning checks, dashboard behavior tests, Python 3.12/3.14 CI, and an explicit portable compatibility workflow.
+
 ## [2.2.0] - 2026-10-24
 
 ### Fixed

@@ -423,3 +423,10 @@ header{display:flex;align-items:center;justify-content:space-between;padding:2px
 .effort-btn.active{background:var(--accent);color:#0a0b0a;border-color:var(--accent);font-weight:700}
 .fallback-row{display:inline-flex;align-items:center;gap:4px;margin-top:3px}
 .fallback-btn.active{background:var(--accent);color:#0a0b0a;border-color:var(--accent);font-weight:700}
+
+/* Catalog status keeps stale data visible without claiming it is current. */
+.catalog-status{font-size:.66rem;color:var(--text3);line-height:1.5;margin-bottom:8px;overflow-wrap:anywhere}
+.catalog-status.warn{color:var(--amber)}
+.browser-item.unavailable .browser-name{opacity:.55}
+.browser-item.unavailable{cursor:default}
+.browser-test:disabled{opacity:.35;cursor:not-allowed}

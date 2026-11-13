@@ -308,8 +308,11 @@ def atomic_write(path: Path, content: str, mode: int = 0o600) -> None:
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
     try:
-        os.fchmod(fd, mode)
-        with os.fdopen(fd, "w") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            # Windows has no fchmod; mkstemp still creates a private file.
+            # Keep descriptor ownership inside the context if chmod fails.
+            if hasattr(os, "fchmod"):
+                os.fchmod(fh.fileno(), mode)
             fh.write(content)
             fh.flush()
             os.fsync(fh.fileno())

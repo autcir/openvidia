@@ -8,25 +8,11 @@ let modelFilter = 'starred'
 let keyFilter = 'active'
 let _lastKeyStats = null
 
-/* ── Popular models shortcut ─────────────────
-   NVIDIA free-tier chat models, checked against GET /v1/models on
-   2026-10-24. The catalog changes monthly: ids the provider drops simply
-   stop matching, so a stale entry hides itself instead of breaking. */
-const POPULAR_MODELS = new Set([
-  'z-ai/glm-5.3',
-  'z-ai/glm-5.3-flash',
-  'deepseek-ai/deepseek-v4.1-flash',
-  'nvidia/nemotron-3-ultra-550b-a55b',
-  'nvidia/nemotron-3.5-lightning-30b-a3b',
-  'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning',
-  'poolside/laguna-xs-2.1',
-  'google/gemma-4-31b-it',
-  'google/diffusiongemma-26b-a4b-it',
-  'meta/muse-glimmer-30b',
-  'openai/gpt-oss-20b',
-  'meta/llama-3.2-90b-vision-instruct',
-  'meta/llama-3.2-11b-vision-instruct',
-])
+// Catalog and health come from the proxy. Never bake model ids into this UI.
+let catalogLoaded = false
+let catalogRefreshedAt = null
+let catalogError = ''
+let catalogFetchPending = false
 
 const $ = id => document.getElementById(id)
 
@@ -58,7 +44,9 @@ async function api(method, path, body) {
     throw new Error('This dashboard has no control token. Reopen it from the OpenVidia app, or append ?token=<contents of ~/.config/openvidia/control_token>')
   }
   if (!r.ok) { let t; try { t = await r.text() } catch { t = r.statusText }; throw new Error(t) }
-  return r.json()
+  const data = await r.json()
+  if (data && data.ok === false) throw new Error(data.error || 'Request rejected')
+  return data
 }
 
 /* ── Toast ──────────────────────────────────── */
@@ -161,26 +149,36 @@ async function loadPresets() {
   try { const r = await api('GET', '/api/presets'); presets = r.presets || [] } catch (_) { presets = [] }
   renderFilters(); renderModelList()
 }
-async function savePresets() { try { await api('POST', '/api/presets', { presets }) } catch (_) {} renderFilters(); renderModelList() }
+async function savePresets(next) {
+  try {
+    await api('POST', '/api/presets', { presets: next })
+    presets = next
+    renderFilters(); renderModelList()
+    return true
+  } catch (e) { toast(`Could not save favorites: ${e.message}`, 'error'); return false }
+}
 
 function shortLabel(id) {
-  const known = { 'z-ai/glm-5.3': 'GLM 5.3', 'z-ai/glm-5.3-flash': 'GLM 5.3 Flash', 'deepseek-ai/deepseek-v4.1-flash': 'DeepSeek V4.1 Flash' }
-  if (known[id]) return known[id]
   return id.split('/').pop()
 }
 
 async function setModel(id) {
+  if (catalogLoaded && id && !allModels.some(m => m.id === id)) {
+    toast('This model is absent from the current catalog. Refresh or choose another model.', 'error')
+    return
+  }
   try {
-    await fetch('/api/model', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: id }) })
-    activeModel = id
-    $('activeModelDisplay').textContent = id || 'none'
+    const result = await api('POST', '/api/model', { model: id })
+    activeModel = result.model ?? id
+    renderCatalogStatus()
     renderModelList(); renderUsage()
-    toast(`Model: ${id || 'none'}`, 'ok')
-  } catch (_) {}
+    await Promise.all([loadThinking(), loadEffort(), loadFallback()])
+    toast(`Model: ${activeModel || 'none'}`, 'ok')
+  } catch (e) { toast(`Model change failed: ${e.message}`, 'error') }
 }
 
 async function loadModel() {
-  try { const r = await api('GET', '/api/model'); activeModel = r.model || ''; $('activeModelDisplay').textContent = activeModel || 'none' } catch (_) {}
+  try { const r = await api('GET', '/api/model'); activeModel = r.model || ''; renderCatalogStatus() } catch (_) {}
   loadThinking()
   loadEffort()
   loadFallback()
@@ -212,15 +210,11 @@ async function loadThinking() {
 
 async function setThinking(mode) {
   try {
-    await fetch('/api/thinking', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode })
-    })
-    thinkingMode = mode
+    const result = await api('POST', '/api/thinking', { mode })
+    thinkingMode = result.mode ?? mode
     renderThinking()
-    toast(`Thinking: ${mode}${activeModel ? ' — ' + activeModel : ''}`, 'ok')
-  } catch (_) {}
+    toast(`Thinking: ${thinkingMode}${activeModel ? ' — ' + activeModel : ''}`, 'ok')
+  } catch (e) { toast(`Thinking change failed: ${e.message}`, 'error') }
 }
 
 /* ── Reasoning effort ──────────────────────────
@@ -248,15 +242,11 @@ async function loadEffort() {
 
 async function setEffort(effort) {
   try {
-    await fetch('/api/reasoning-effort', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ effort })
-    })
-    reasoningEffort = effort
+    const result = await api('POST', '/api/reasoning-effort', { effort })
+    reasoningEffort = result.effort ?? effort
     renderEffort()
-    toast(`Effort: ${effort}${activeModel ? ' — ' + activeModel : ''}`, 'ok')
-  } catch (_) {}
+    toast(`Effort: ${reasoningEffort}${activeModel ? ' — ' + activeModel : ''}`, 'ok')
+  } catch (e) { toast(`Effort change failed: ${e.message}`, 'error') }
 }
 
 /* ── Fallback toggle ───────────────────────────
@@ -288,20 +278,22 @@ async function setFallback(mode) {
     fallbackMode = mode
     renderFallback()
     toast(`Fallback: ${mode}${activeModel ? ' — ' + activeModel : ''}`, 'ok')
-  } catch (_) {}
+  } catch (e) { toast(`Fallback change failed: ${e.message}`, 'error') }
 }
 
 /* ── Models browser ──────────────────────────── */
-const FILTERS = ['starred', 'all', 'popular']
+const FILTERS = ['starred', 'all', 'verified']
 function getFilteredModels() {
   let list
   if (modelFilter === 'starred') {
     // in the order they were starred
-    list = presets.map(id => allModels.find(m => m.id === id) || { id, owned_by: '' })
-  } else if (modelFilter === 'popular') {
-    list = allModels.filter(m => POPULAR_MODELS.has(m.id))
+    list = presets.map(id => allModels.find(m => m.id === id) || { id, owned_by: '', unavailable: catalogLoaded })
+  } else if (modelFilter === 'verified') {
+    // Observed success is evidence of availability, not a promise of tool support.
+    list = allModels.filter(m => m.id !== 'openvidia' && m.health?.success > 0 && !m.health.circuit_open && m.health.failure_rate < 0.5)
+      .sort((a, b) => (a.health.failure_rate - b.health.failure_rate) || (a.health.median_ttft - b.health.median_ttft))
   } else {
-    list = allModels
+    list = [...allModels]
   }
   const q = ($('modelSearch').value || '').toLowerCase()
   if (q) list = list.filter(m => m.id.toLowerCase().includes(q))
@@ -319,21 +311,51 @@ function renderFilters() {
     const b = document.createElement('button')
     b.className = `browser-filter ${f === modelFilter ? 'active' : ''}`
     if (f === 'starred') b.innerHTML = `★ Starred <span class="filter-count">${presets.length}</span>`
-    else if (f === 'popular') b.textContent = 'Popular'
+    else if (f === 'verified') { b.textContent = 'Answered'; b.title = 'Models with successful traffic through this proxy; capabilities still depend on the model' }
     else b.textContent = 'All'
     b.onclick = () => { modelFilter = f; renderFilters(); renderModelList() }
     c.appendChild(b)
   })
 }
 
-async function fetchModels() {
-  try {
-    const r = await fetch('/v1/models'); const d = await r.json()
-    allModels = (d.data || d.models || []).map(m => ({ id: m.id, owned_by: m.owned_by || '', health: m.health || null }))
-    $('modelCount').textContent = allModels.length
-    renderFilters(); renderModelList(); renderUsage()
-  } catch (_) { $('modelList').innerHTML = '<div class="browser-empty">Failed to load</div>' }
+function renderCatalogStatus() {
+  const absent = catalogLoaded && activeModel && !allModels.some(m => m.id === activeModel)
+  $('activeModelDisplay').textContent = (activeModel || 'none') + (absent ? ' — unavailable in catalog' : '')
+  const status = $('catalogStatus')
+  status.className = `catalog-status${catalogError || absent ? ' warn' : ''}`
+  const freshness = catalogRefreshedAt ? `Catalog refreshed ${catalogRefreshedAt.toLocaleTimeString()}` : 'Catalog not loaded'
+  status.textContent = catalogError
+    ? `${freshness} — refresh failed; showing the last successful catalog. ${catalogError}`
+    : `${freshness}${absent ? ' — choose another active model; it is no longer listed.' : ''}`
 }
+
+async function fetchModels() {
+  if (catalogFetchPending) return
+  catalogFetchPending = true
+  const controller = new AbortController()
+  const deadline = setTimeout(() => controller.abort(), 15000)
+  try {
+    const r = await fetch('/v1/models', { signal: controller.signal })
+    if (!r.ok) throw new Error(`HTTP ${r.status}`)
+    const d = await r.json()
+    const models = d.data || d.models
+    if (!Array.isArray(models) || models.some(m => !m || typeof m.id !== 'string')) throw new Error('Invalid model catalog')
+    allModels = models.map(m => ({ ...m, owned_by: m.owned_by || '', health: m.health || null }))
+    catalogLoaded = true
+    catalogRefreshedAt = new Date()
+    catalogError = ''
+    await loadModel()
+    renderFilters(); renderModelList(); renderUsage()
+  } catch (e) {
+    catalogError = e.name === 'AbortError' ? 'Request timed out' : e.message
+    if (!catalogLoaded) $('modelList').textContent = 'Catalog unavailable. Retrying automatically.'
+  } finally {
+    clearTimeout(deadline)
+    catalogFetchPending = false
+  }
+  renderCatalogStatus()
+}
+$('refreshModelsBtn').addEventListener('click', fetchModels)
 // Refresh the catalog every 60s: NVIDIA removes/renames models without notice,
 // and the list has to follow along without a page reload.
 setInterval(fetchModels, 60000)
@@ -357,19 +379,23 @@ function renderModelList() {
   if (!f.length) {
     const hint = modelFilter === 'starred'
       ? 'No starred models — tap ☆ on any model in All'
-      : 'No models found'
+      : modelFilter === 'verified' ? 'No observed responses yet — send a request through the proxy. Answered means observed success, not a capability guarantee.' : 'No models found'
     $('modelList').innerHTML = `<div class="browser-empty">${hint}</div>`
     return
   }
   $('modelList').innerHTML = ''
   f.forEach(m => {
     const item = document.createElement('div')
-    item.className = `browser-item ${m.id === activeModel ? 'active' : ''}`
+    item.className = `browser-item ${m.id === activeModel ? 'active' : ''}${m.unavailable ? ' unavailable' : ''}`
     // m.id / m.owned_by / m.health come straight from the upstream /v1/models
     // response (enriched by the proxy with ModelHealth). Remote data never
     // becomes markup.
     const nm = document.createElement('span'); nm.className = 'browser-name'; nm.textContent = m.id
     item.appendChild(nm)
+    if (m.unavailable) {
+      const badge = document.createElement('span'); badge.className = 'health-badge health-bad'; badge.textContent = 'not listed'; item.appendChild(badge)
+      item.title = 'Absent from the current catalog. Remove this favorite or wait for a refresh.'
+    }
     // Health badge: open circuit (model down) or high failure rate
     // (model degraded) → the problem is NVIDIA, not the keys.
     if (m.health) {
@@ -377,11 +403,11 @@ function renderModelList() {
       let cls = '', label = ''
       if (h.circuit_open) { cls = 'health-bad'; label = 'down' }
       else if (h.failure_rate >= 0.5 && h.requests >= 4) { cls = 'health-bad'; label = 'failing' }
-      else if (h.median_ttft > 5000 && h.requests >= 4) { cls = 'health-slow'; label = `slow ${Math.round(h.median_ttft / 1000)}s` }
+      else if (h.median_ttft > 5 && h.requests >= 4) { cls = 'health-slow'; label = `slow ${Math.round(h.median_ttft)}s` }
       if (cls) {
         const hb = document.createElement('span')
         hb.className = `health-badge ${cls}`; hb.textContent = label
-        hb.title = `${h.requests} req · ${Math.round(h.failure_rate * 100)}% fail · median ttft ${Math.round(h.median_ttft)}ms — upstream NVIDIA, not your keys`
+        hb.title = `${h.requests} req · ${Math.round(h.failure_rate * 100)}% fail · median ttft ${Math.round(h.median_ttft)}s — upstream NVIDIA, not your keys`
         item.appendChild(hb)
       }
     }
@@ -391,6 +417,7 @@ function renderModelList() {
     }
     const acts = document.createElement('div'); acts.className = 'browser-acts'
     const test = document.createElement('button'); test.className = 'browser-test'; test.textContent = '▶'; test.title = 'Test'
+    test.disabled = Boolean(m.unavailable)
     test.onclick = e => { e.stopPropagation(); testModel(m.id, test) }
     acts.appendChild(test)
     const starred = presets.includes(m.id)
@@ -398,16 +425,14 @@ function renderModelList() {
     star.className = `browser-star ${starred ? 'on' : ''}`
     star.textContent = starred ? '★' : '☆'
     star.title = starred ? 'Unstar — remove from shortlist' : 'Star — add to shortlist'
-    star.onclick = e => {
+    star.onclick = async e => {
       e.stopPropagation()
-      if (starred) presets = presets.filter(x => x !== m.id)
-      else presets.push(m.id)
-      savePresets()
-      toast(`${starred ? 'Unstarred' : 'Starred'} ${shortLabel(m.id)}`, 'ok')
+      const next = starred ? presets.filter(x => x !== m.id) : [...presets, m.id]
+      if (await savePresets(next)) toast(`${starred ? 'Unstarred' : 'Starred'} ${shortLabel(m.id)}`, 'ok')
     }
     acts.appendChild(star)
     item.appendChild(acts)
-    item.onclick = () => setModel(m.id)
+    if (!m.unavailable) item.onclick = () => setModel(m.id)
     $('modelList').appendChild(item)
   })
 }

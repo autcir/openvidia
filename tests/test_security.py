@@ -23,6 +23,15 @@ KEY_A = "nvapi-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 KEY_B = "nvapi-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 
+def test_atomic_write_without_unix_fchmod(tmp_path, monkeypatch):
+    monkeypatch.delattr(os, "fchmod", raising=False)
+    target = tmp_path / "settings.json"
+    config.atomic_write(target, "Unicode: è ✓")
+    assert target.read_text(encoding="utf-8") == "Unicode: è ✓"
+    config.atomic_write(target, "replacement")
+    assert target.read_text() == "replacement"
+
+
 @pytest.fixture
 def token(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "config_dir", lambda: tmp_path)
@@ -202,10 +211,11 @@ def test_the_page_does_not_carry_the_token(raw_client, token):
     assert token not in raw_client.get("/").text
 
 
-def test_token_is_persisted_0600(tmp_path, token):
+def test_token_is_persisted_and_private_on_posix(tmp_path, token):
     p = tmp_path / "control_token"
     assert p.read_text().strip() == token
-    assert p.stat().st_mode & 0o077 == 0
+    if sys.platform != "win32":
+        assert p.stat().st_mode & 0o077 == 0
 
 
 def test_token_is_stable_across_calls(monkeypatch, tmp_path, token):
@@ -299,7 +309,6 @@ def test_saved_keys_are_not_world_readable(tmp_path, monkeypatch):
     assert mode & 0o077 == 0, oct(mode)
 
 
-@posix_only
 def test_atomic_write_leaves_no_temp_file_behind(tmp_path):
     d = tmp_path / "writes"
     d.mkdir()
@@ -309,7 +318,6 @@ def test_atomic_write_leaves_no_temp_file_behind(tmp_path):
     assert [p.name for p in d.iterdir()] == ["out.json"]
 
 
-@posix_only
 def test_atomic_write_overwrites_existing(tmp_path):
     """Path.rename raises on Windows when the target exists; os.replace does not."""
     target = tmp_path / "out.json"

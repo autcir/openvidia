@@ -6,9 +6,23 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
-    name: Pytest
+    # Public fork code must not execute with the persistent runner's credentials.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    name: Pytest (Python ${{ matrix.python }})
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.14"]
     runs-on: [self-hosted, soliso, autcir, openvidia]
 
     steps:
@@ -24,13 +38,19 @@ jobs:
       # them at module scope — the first test to touch server_manager would
       # have failed for a reason that had nothing to do with the change.
       - name: Sync dependencies
-        run: uv sync --frozen
+        run: uv sync --frozen --python "${{ matrix.python }}"
 
       - name: Run tests
         run: uv run pytest tests/ -v --tb=short
 
+      - name: Dashboard behavior
+        run: node --test tests/dashboard.test.cjs
+
   lint:
+    # Public fork code must not execute with the persistent runner's credentials.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: Ruff
+    timeout-minutes: 10
     runs-on: [self-hosted, soliso, autcir, openvidia]
 
     steps:
@@ -43,13 +63,16 @@ jobs:
         run: uv sync --frozen
 
       - name: Lint
-        run: uv run ruff check openvidia/ tests/
+        run: uv run ruff check openvidia/ tests/ scripts/
 
       - name: Format check
-        run: uv run ruff format --check openvidia/ tests/
+        run: uv run ruff format --check openvidia/ tests/ scripts/
 
   package:
+    # Public fork code must not execute with the persistent runner's credentials.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: Wheel installs and serves
+    timeout-minutes: 15
     runs-on: [self-hosted, soliso, autcir, openvidia]
 
     steps:
@@ -82,15 +105,41 @@ jobs:
           print("dashboard bundle OK:", web)
           PY
 
-      - name: The entry point runs
-        run: /tmp/ov-pkg-check/bin/openvidia --help
+      - name: The entry point runs without desktop packages
+        run: |
+          cd /tmp
+          /tmp/ov-pkg-check/bin/openvidia --help
+          /tmp/ov-pkg-check/bin/python -c 'import importlib.util; assert importlib.util.find_spec("PyQt6") is None'
+
+
+      - name: Installed wheel serves health
+        run: |
+          cd /tmp
+          /tmp/ov-pkg-check/bin/python - <<'PYCODE'
+          import asyncio, pathlib, tempfile
+          import httpx, openvidia
+          from openvidia import config
+          from openvidia.proxy_app import create_app
+          from openvidia.proxy_state import ProxyState, ProxyStats
+          async def check():
+              with tempfile.TemporaryDirectory() as directory:
+                  config.config_dir = lambda: pathlib.Path(directory)
+                  app = create_app(ProxyState([], ProxyStats(), log_cb=lambda _: None))
+                  async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://localhost:1919") as client:
+                      response = await client.get("/health")
+                      assert response.status_code == 200 and response.json()["service"] == "openvidia"
+          asyncio.run(check())
+          PYCODE
 
       - name: Cleanup
         if: always()
         run: rm -rf /tmp/ov-pkg-check
 
   shell:
+    # Public fork code must not execute with the persistent runner's credentials.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: Shellcheck
+    timeout-minutes: 5
     runs-on: [self-hosted, soliso, autcir, openvidia]
 
     steps:

@@ -228,6 +228,29 @@ async def test_attempt_budget_is_honoured():
     assert len(client.sent) == _MAX_ROTATE_ATTEMPTS
 
 
+async def test_gateway_failures_cannot_refund_the_attempt_budget():
+    state = make_state(keys=[f"nvapi-k{i}" for i in range(30)])
+    client = FakeClient([503] * 50)
+    await run(state, client)
+    assert len(client.sent) == _MAX_ROTATE_ATTEMPTS
+
+
+async def test_retry_after_reaches_the_adaptive_limiter():
+    class LimitedClient(FakeClient):
+        async def send(self, req, stream=False):
+            response = await super().send(req, stream=stream)
+            if response.status_code == 429:
+                response.headers["Retry-After"] = "30"
+            return response
+
+    state = make_state()
+    client = LimitedClient([429, 200])
+    await run(state, client)
+    tracker = state.rpm[state.keys[0]]
+    assert tracker.observed_ceiling == 2
+    assert state.cooldown_remaining(state.keys[0]) >= 29
+
+
 async def test_spent_budget_does_not_pay_for_the_remaining_passes():
     """`break` left the inner loop only, so each exhausted phase slept 2s extra."""
     state = make_state(keys=[f"nvapi-k{i}" for i in range(20)])

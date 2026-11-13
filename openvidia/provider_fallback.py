@@ -32,10 +32,10 @@ def load_provider_configs() -> list[ProviderConfig]:
     path = config.config_dir() / "providers.json"
     if not path.exists():
         return []
-    raw = path.read_text(encoding="utf-8")
     try:
+        raw = path.read_text(encoding="utf-8")
         entries = json.loads(raw)
-    except (ValueError, TypeError):
+    except (OSError, ValueError, TypeError):
         # A corrupt JSON file must never bring the proxy down: ignore it.
         return []
     if not isinstance(entries, list):
@@ -52,6 +52,10 @@ def load_provider_configs() -> list[ProviderConfig]:
         if not isinstance(api_key_env, str) or not os.environ.get(api_key_env):
             continue
         models_map = entry.get("models") or {}
+        if not base_url.startswith("https://") and not base_url.startswith(
+            ("http://localhost:", "http://127.0.0.1:", "http://[::1]:")
+        ):
+            continue
         providers.append(
             ProviderConfig(
                 name=name,
@@ -78,11 +82,12 @@ async def try_fallback(
     client: httpx.AsyncClient,
     payload: dict,
     provider: ProviderConfig,
-    stream: bool = False,
+    stream: bool | None = None,
 ) -> httpx.Response | None:
     """Attempt one fallback provider; None on any upstream failure."""
     try:
-        resp = await client.post(
+        request = client.build_request(
+            "POST",
             provider.base_url + "/chat/completions",
             json=rewrite_payload(payload, provider),
             headers={
@@ -91,8 +96,12 @@ async def try_fallback(
             },
             timeout=_TIMEOUT_S,
         )
+        resp = await client.send(
+            request, stream=bool(payload.get("stream")) if stream is None else stream
+        )
     except httpx.HTTPError:
         return None
     if not resp.is_success:
+        await resp.aclose()
         return None
     return resp

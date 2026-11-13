@@ -36,15 +36,15 @@ Or manually:
 # Install uv (recommended) — https://astral.sh/uv
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-uv sync                          # install dependencies
-uv run openvidia setup           # auto-configure opencode
-uv run openvidia                 # start proxy + desktop app
+uv sync --frozen --extra desktop  # install desktop dependencies
+uv run --extra desktop openvidia setup  # configure opencode
+uv run --extra desktop openvidia        # reuse/start proxy + desktop app
 ```
 
 With pip:
 
 ```bash
-pip install -e .
+pip install -e '.[desktop]'
 openvidia setup
 openvidia
 ```
@@ -52,23 +52,23 @@ openvidia
 ### macOS
 
 ```bash
-brew install python@3.12 pygobject pkg-config
+brew install python@3.12
 git clone https://github.com/autcir/openvidia.git
 cd openvidia
-pip install -e .
+pip install -e '.[desktop]'
 openvidia setup
 openvidia
 ```
 
 > pywebview on macOS uses system WebKit (native, no extra deps).
-> If you hit a GTK build error, install `pygobject` via Homebrew or just skip it — macOS doesn't need it.
+> GTK/PyGObject is not required for the native macOS backend.
 
 ### Windows
 
 ```cmd
 git clone https://github.com/autcir/openvidia.git
 cd openvidia
-pip install -e .
+pip install -e ".[desktop]"
 openvidia setup
 openvidia
 ```
@@ -122,7 +122,7 @@ NVIDIA's free NIM tier limits each API key to ~40 RPM. Aggressive bursts trigger
 - **Rotates automatically** on 429/401/403/5xx — zero manual intervention
 - **Per-key cooldown timers** — on real 429s, trusts `Retry-After` exactly (no multiplication); distinguishes transient worker saturation (`ResourceExhausted`) from true RPM limits and never burns key cooldowns for the former
 - **Network-error circuit breaker** — `ConnectTimeout`/`ConnectError` don't trigger key cooldown (the key is fine). After 3 consecutive network errors across different keys, rotation stops entirely and returns 503 (the network is down, no key can help)
-- **504 model timeouts don't burn keys** — gateway timeouts cool the key for 30s but don't consume the attempt budget, since the model (not the key) is the bottleneck
+- **Bounded gateway retries** — gateway failures cool the key for 30s and spend the attempt budget so a large pool cannot amplify an outage indefinitely
 - **Sliding-window RPM limiting** — keeps each key under 28 RPM (safe margin below 40); the ceiling self-tunes down from real `Retry-After` headers, so the pool never spends its full budget against a tighter upstream limit
 - **Health checks** — revives keys whose cooldowns have expired, but skips 401/403 invalid keys (dead keys stay dead)
 - **No silent model substitution** — the model you select is the model that answers; if it fails on every key you are told so, never handed output from a different model
@@ -142,22 +142,22 @@ NVIDIA's free NIM tier limits each API key to ~40 RPM. Aggressive bursts trigger
 |---------|-------------|
 | `openvidia` | Start proxy in background + open desktop app |
 | `openvidia foreground` | Foreground mode (logs to stdout, no UI) |
-| `openvidia setup` | Auto-configure detected CLIs: opencode, Codex, Grok (Claude Code requires manual env vars) |
+| `openvidia setup` | Configure opencode and Jcode; other clients use `openvidia run <cli>` |
 
 ---
 
 ## CLI Setup Guides
 
-> **TL;DR — run `openvidia setup` once.** It auto-detects and configures every CLI you have installed. You only need to read the manual steps below if something doesn't work or you prefer to configure things yourself.
+> **TL;DR — run `openvidia setup` once.** It configures opencode and Jcode. Use `openvidia run <cli>` for process-scoped configuration of other clients. You only need to read the manual steps below if something doesn't work or you prefer to configure things yourself.
 
 Supported clients:
 
 | CLI | Protocol | Endpoint | Auto-setup |
 |-----|----------|----------|------------|
 | **opencode** | OpenAI-compatible | `http://localhost:1919/v1` | ✅ `openvidia setup` |
-| **Codex CLI** | OpenAI Responses API | `http://localhost:1919/v1` | ✅ `openvidia setup` |
+| **Codex CLI** | OpenAI Responses API | `http://localhost:1919/v1` | `openvidia run codex` |
 | **Claude Code** | Anthropic Messages API | `http://localhost:1919` | ❌ manual env vars |
-| **Grok (xAI)** | OpenAI-compatible | `http://localhost:1919/v1` | ✅ `openvidia setup` |
+| **Grok (xAI)** | OpenAI-compatible | `http://localhost:1919/v1` | `openvidia run grok` |
 | **Jcode** | OpenAI-compatible | `http://localhost:1919/v1` | ✅ `openvidia setup` |
 
 ---
@@ -165,7 +165,7 @@ Supported clients:
 ### opencode
 
 ```bash
-openvidia setup    # configures provider + model + compaction + instructions
+openvidia setup    # configures provider + model + default compaction
 opencode           # then /model openvidia
 ```
 
@@ -568,13 +568,13 @@ This model's maximum context length is 202752 tokens.
 However, your messages resulted in 320011 tokens.
 ```
 
-So the proxy asks once, in the background, caches the answer in
-`model_limits.json`, and also harvests it from any real overflow. Precedence:
+The proxy learns the limit from a real overflow rejection and caches the answer in
+`model_limits.json`. It does not send oversized speculative probes. Precedence:
 your `model_budgets` override → learned → the conservative default. An unknown
-model is never allowed to overflow while it is being learned.
+model uses the conservative default until the provider supplies a learned limit.
 
-The day your provider ships a new flagship, you select it and it runs at full
-context. Nothing to configure.
+New models appear in the live catalog. Their actual context and tool compatibility
+must be learned or tested; listing a model does not certify its capabilities.
 
 ---
 
@@ -786,3 +786,39 @@ MIT
 ---
 
 Built by [Ciro Autuori](https://github.com/ciroautuori).
+
+
+## Reliable operation and updates
+
+For an unattended Linux service, install with `./install.sh --headless --service`.
+For a desktop plus managed service, use `./install.sh --desktop --service`.
+The desktop reuses an existing OpenVidia process. Closing the window or choosing
+Quit closes the dashboard only; it does not terminate the proxy. An unrelated
+process on the configured port is never terminated automatically.
+
+The model browser refreshes the live catalog every 60 seconds and keeps its last
+successful catalog during network failures, with visible freshness/error status.
+**Answered** means a model has successfully responded in this proxy process;
+it does not certify tool use, vision or a context limit. Retired favorites remain
+visible as unavailable. Changing a model or reasoning setting is confirmed by
+the authenticated server before the interface reports success.
+
+`/health` identifies the running proxy independently of desktop assets. `/ready`
+reports whether it is enabled and has an eligible key; it is
+not a successful-inference guarantee. Real streaming and tool roundtrips are
+checked by the long-duration monitor in `python -m openvidia.soak --help`.
+
+Application updates are separate from catalog updates. See
+[verified release installation and rollback](docs/updates.md). Checks are opt-in;
+updates do not replace dependencies inside a running environment or restart an
+active conversation. Provider fallback is also opt-in via `providers.json` and
+currently applies to Chat Completions (OpenCode), including incremental SSE and
+tool messages. Responses/Messages protocol shims do not promise cross-provider
+failover. A partially emitted response is never replayed on another provider.
+
+The automated Linux tests and local smoke checks do not establish 24/7 uptime or
+Windows/macOS support on every machine. The manual Portable compatibility
+workflow runs the suite and resolves desktop dependencies on Linux, Windows and
+macOS when GitHub-hosted runners are available. NVIDIA quotas, shared worker
+availability and the selected model remain external dependencies; adding keys
+cannot guarantee unlimited throughput or continuous free service.

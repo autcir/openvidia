@@ -1,56 +1,45 @@
 name: Model catalog
 
-# NVIDIA adds and retires NIM models every few weeks, and nothing in the test
-# suite can notice: the tests are hermetic by design. A retired id baked into
-# the defaults fails silently at runtime — the compaction summary model did
-# exactly that, and every compaction spent its attempts on 404s. This job
-# compares every model id the code ships against the live catalog and fails
-# when one is gone, so the fix is a one-line PR instead of a user report.
-#
-# GET /v1/models answers without an API key, so no secret is needed.
-
 on:
   schedule:
-    - cron: "17 6 * * 1"
+    - cron: "17 6 * * *"
   workflow_dispatch:
+  pull_request:
+    paths:
+      - openvidia/config.py
+      - openvidia/compaction.py
+      - scripts/check_catalog.py
+      - .github/workflows/catalog.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: catalog-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   catalog:
+    # Public fork code must not execute with the persistent runner's credentials.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: Shipped model ids still served
     runs-on: [self-hosted, soliso, autcir, openvidia]
-
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-
-      - name: Sync dependencies
-        run: uv sync --frozen
-
-      - name: Compare against GET /v1/models
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --frozen
+      - name: Compare tuning against live catalog
+        run: uv run python -m scripts.check_catalog
+      - name: Publish catalog status
+        if: always()
         run: |
-          uv run python - <<'PY'
-          import re, sys, pathlib
-          import httpx
-          from openvidia.config import UPSTREAM_BASE, _MODEL_OPTIONS_DEFAULTS
-          from openvidia.compaction import _DEFAULTS
-
-          r = httpx.get(UPSTREAM_BASE + "models", timeout=30)
-          r.raise_for_status()
-          live = {m["id"] for m in r.json()["data"]}
-
-          shipped = {f"config per_model: {m}": m for m in _MODEL_OPTIONS_DEFAULTS["per_model"]}
-          if _DEFAULTS["summary_model"]:
-              shipped["compaction summary_model"] = _DEFAULTS["summary_model"]
-          js = pathlib.Path("openvidia/web/main.js").read_text()
-          block = js[js.index("const POPULAR_MODELS") : js.index("])", js.index("const POPULAR_MODELS"))]
-          for m in re.findall(r"'([^']+)'", block):
-              shipped[f"main.js POPULAR_MODELS: {m}"] = m
-
-          gone = sorted(where for where, m in shipped.items() if m not in live)
-          print(f"{len(live)} models live, {len(shipped)} ids shipped")
-          for where in gone:
-              print(f"::error::retired upstream — {where}")
-          sys.exit(1 if gone else 0)
-          PY
+          if [ -f catalog-report.json ]; then
+            {
+              printf '### Live catalog check\n```json\n'
+              cat catalog-report.json
+              printf '\n```\n'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Catalog check did not finish. Inspect the failed step.' >> "$GITHUB_STEP_SUMMARY"
+          fi
