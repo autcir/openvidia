@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "status": "failed",
+  "started_at": "2026-11-13T18:03:03.192625+00:00",
+  "base_url": "http://127.0.0.1:1919",
+  "timeout_seconds": 120.0,
+  "concurrency": 2,
+  "probe": "stream_done_and_tool_result_roundtrip",
+  "scope": "explicit_selection",
+  "results": [
+    {
+      "declared_model": "nvidia/nemotron-3-ultra-550b-a55b",
+      "started_at": "2026-11-13T18:03:03.192926+00:00",
+      "status": "passed",
+      "stages": {
+        "health": true,
+        "stream": true,
+        "tool_call": true,
+        "tool_result": true
+      },
+      "response_models": [
+        "nvidia/nemotron-3-ultra-550b-a55b"
+      ],
+      "identity": "matched",
+      "latency_seconds": 6.343,
+      "finished_at": "2026-11-13T18:03:09.535731+00:00"
+    },
+    {
+      "declared_model": "nvidia/nemotron-3.5-super-vl-120b-a12b",
+      "started_at": "2026-11-13T18:03:03.238871+00:00",
+      "status": "passed",
+      "stages": {
+        "health": true,
+        "stream": true,
+        "tool_call": true,
+        "tool_result": true
+      },
+      "response_models": [
+        "private/nvidia/nemotron-3.5-super-120b-a12b"
+      ],
+      "identity": "different",
+      "latency_seconds": 13.95,
+      "finished_at": "2026-11-13T18:03:17.188661+00:00"
+    },
+    {
+      "declared_model": "minimaxai/minimax-m3.1-flash",
+      "started_at": "2026-11-13T18:03:09.536067+00:00",
+      "status": "passed",
+      "stages": {
+        "health": true,
+        "stream": true,
+        "tool_call": true,
+        "tool_result": true
+      },
+      "response_models": [
+        "minimaxai/minimax-m3.1-flash"
+      ],
+      "identity": "matched",
+      "latency_seconds": 29.739,
+      "finished_at": "2026-11-13T18:03:39.274866+00:00"
+    },
+    {
+      "declared_model": "mistralai/mistral-large-4-1t-a52b",
+      "started_at": "2026-11-13T18:03:17.189013+00:00",
+      "status": "passed",
+      "stages": {
+        "health": true,
+        "stream": true,
+        "tool_call": true,
+        "tool_result": true
+      },
+      "response_models": [
+        "mistralai/mistral-large-4-1t-a52b"
+      ],
+      "identity": "matched",
+      "latency_seconds": 60.251,
+      "finished_at": "2026-11-13T18:04:17.439628+00:00"
+    },
+    {
+      "declared_model": "z-ai/glm-5.3-flash",
+      "started_at": "2026-11-13T18:03:39.275335+00:00",
+      "status": "failed",
+      "stages": {
+        "health": true,
+        "stream": false,
+        "tool_call": false,
+        "tool_result": false
+      },
+      "error_type": "TimeoutError",
+      "response_models": [],
+      "identity": "not_reported",
+      "latency_seconds": 120.076,
+      "finished_at": "2026-11-13T18:05:39.350912+00:00"
+    },
+    {
+      "declared_model": "stepfun-ai/step-5-preview",
+      "started_at": "2026-11-13T18:04:17.440024+00:00",
+      "status": "failed",
+      "stages": {
+        "health": true,
+        "stream": true,
+        "tool_call": true,
+        "tool_result": false
+      },
+      "error_type": "TimeoutError",
+      "response_models": [
+        "stepfun-ai/step-5-preview"
+      ],
+      "identity": "matched",
+      "latency_seconds": 120.042,
+      "finished_at": "2026-11-13T18:06:17.481569+00:00"
+    }
+  ],
+  "finished_at": "2026-11-13T18:06:17.482102+00:00",
+  "elapsed_seconds": 194.289,
+  "passed": 4,
+  "failed": 2,
+  "tested_proxy_commit": "fa2806b",
+  "purpose": "Point-in-time protocol smoke check; not a coding quality benchmark or uptime certificate"
+}

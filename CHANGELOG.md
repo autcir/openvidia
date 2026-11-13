@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.3.0] - Unreleased
 
 ### Fixed
+- Keep the catalog and healthy models reachable after a model-specific 504; retry configured endpoints when all are temporarily blacklisted.
 - Authenticate dashboard setting changes and report rejected writes without false success.
 - Replace hardcoded model recommendations with observed responses from the live catalog; expose stale selections and refresh failures.
 - Reuse the managed proxy from the desktop and keep it running when the dashboard closes.
@@ -17,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Write configuration on platforms without Unix fchmod.
 
 ### Added
+- Opt-in streaming/tool-result model validator with sanitized identity evidence, plus dated API and real OpenCode integration reports.
 - Default Recent model picker using official Build modification dates and exact inference API intersections; preserve the complete catalog under All.
 - Headless base installation and optional desktop dependencies.
 - Verified isolated release installation, atomic activation, rollback, and opt-in daily update checks.

@@ -1,0 +1,34 @@
+{
+  "tested_at": "2026-11-13T18:12:21.837991+00:00",
+  "opencode_version": "opencode v2.3.0",
+  "method": "private OpenCode server; per-process provider configuration; absolute temporary fixture; completed read tool plus exact nonce answer",
+  "results": [
+    {
+      "model": "minimaxai/minimax-m3.1-flash",
+      "passed": true,
+      "read_tool_completed": true,
+      "reply_matched": true,
+      "timed_out": false,
+      "exit_code": 0,
+      "elapsed_seconds": 10.67
+    },
+    {
+      "model": "nvidia/nemotron-3.5-super-vl-120b-a12b",
+      "passed": true,
+      "read_tool_completed": true,
+      "reply_matched": true,
+      "timed_out": false,
+      "exit_code": 0,
+      "elapsed_seconds": 4.25
+    },
+    {
+      "model": "mistralai/mistral-large-4-1t-a52b",
+      "passed": true,
+      "read_tool_completed": true,
+      "reply_matched": true,
+      "timed_out": false,
+      "exit_code": 0,
+      "elapsed_seconds": 113.59
+    }
+  ]
+}

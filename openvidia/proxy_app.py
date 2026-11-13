@@ -435,7 +435,7 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
 
         # The alternative endpoints are fallbacks: try them in order until the
         # first one answers with the model list.
-        for endpoint in router.healthy_endpoints():
+        for endpoint in router.healthy_endpoints() or router.endpoints:
             for key in keys:
                 if not state.is_key_healthy(key) or not state.key_can_send_rpm(key):
                     continue
@@ -715,7 +715,7 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
                 )
 
         nv_path = full_path[3:] if full_path.startswith("v1/") else full_path
-        endpoint_urls = router.healthy_endpoints() or [UPSTREAM_BASE]
+        endpoint_urls = router.healthy_endpoints() or router.endpoints
 
         CLIENT_FWD_HEADERS = {"content-type", "accept", "x-request-id", "x-trace-id"}
 
@@ -751,9 +751,9 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
                 h["Content-Type"] = "application/json"
             return h
 
-        # Multi-endpoint failover: try the first healthy endpoint; on a 5xx or
-        # a timeout the host is probably partially down, so blacklist it for
-        # ENDPOINT_RETRY_AFTER and move on to the next one. A deterministic
+        # Multi-endpoint failover: try the first healthy endpoint. Host errors
+        # temporarily blacklist it; a 504 is model latency, not proof that the
+        # shared host or its catalog is down. A deterministic
         # error (400/401/404) will not turn out differently on another host:
         # stop right away. An "exhausted" (budget spent) is NOT the host being
         # down: try the next one without blacklisting.
@@ -781,9 +781,10 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
             if resp is not None and resp.status_code == 200:
                 router.mark_success(url)
                 break
-            _endpoint_dead = (resp is not None and resp.status_code >= 500) or (
-                resp is None and (_outcome.get("status") or 0) >= 500
+            endpoint_status = (
+                resp.status_code if resp is not None else (_outcome.get("status") or 0)
             )
+            _endpoint_dead = endpoint_status >= 500 and endpoint_status != 504
             if _endpoint_dead and not _outcome.get("exhausted"):
                 router.mark_failure(url)
             if _outcome.get("deterministic"):

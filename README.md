@@ -18,6 +18,8 @@ Pool multiple free-tier API keys behind one endpoint. Automatic rotation, per-ke
 
 Built for [opencode](https://opencode.ai), [Codex CLI](https://github.com/openai/codex), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Grok](https://x.ai), [Jcode](https://github.com/1jehuang/jcode), and any OpenAI-compatible client.
 
+**Live evidence (13 Nov 2026):** three recent models completed real OpenCode file-tool tests; four of six API protocol cycles passed, with documented timeouts and a returned-model identity caveat. See the [dated validation report](docs/validation-results/2026-11-13.md) and [reproducible opt-in validator](docs/validation.md). The 72-hour run is still in progress.
+
 ---
 
 ## Quick Start
@@ -116,19 +118,19 @@ openvidia
 
 ## Why?
 
-NVIDIA's free NIM tier limits each API key to ~40 RPM. Aggressive bursts trigger a **penalty box** that can lock keys for hours. OpenVidia:
+NVIDIA rate limits and shared worker availability vary by model and account. Bursts can trigger cooldowns; adding keys cannot bypass a shared account limit. OpenVidia:
 
 - **Pools multiple keys** behind a single endpoint
-- **Rotates automatically** on 429/401/403/5xx — zero manual intervention
+- **Rotates automatically** on eligible key/provider errors, with bounded attempts and explicit failure when the pool cannot serve the request
 - **Per-key cooldown timers** — on real 429s, trusts `Retry-After` exactly (no multiplication); distinguishes transient worker saturation (`ResourceExhausted`) from true RPM limits and never burns key cooldowns for the former
 - **Network-error circuit breaker** — `ConnectTimeout`/`ConnectError` don't trigger key cooldown (the key is fine). After 3 consecutive network errors across different keys, rotation stops entirely and returns 503 (the network is down, no key can help)
 - **Bounded gateway retries** — gateway failures cool the key for 30s and spend the attempt budget so a large pool cannot amplify an outage indefinitely
-- **Sliding-window RPM limiting** — keeps each key under 28 RPM (safe margin below 40); the ceiling self-tunes down from real `Retry-After` headers, so the pool never spends its full budget against a tighter upstream limit
+- **Sliding-window RPM limiting** — starts with a 28 RPM per-key ceiling and adapts downward from `Retry-After`; account-level throttling still takes precedence
 - **Health checks** — revives keys whose cooldowns have expired, but skips 401/403 invalid keys (dead keys stay dead)
-- **No silent model substitution** — the model you select is the model that answers; if it fails on every key you are told so, never handed output from a different model
-- **Auto-compaction** — summarizes long histories so requests never fail on context overflow ([details](#auto-compaction))
+- **Explicit routing policy** — the requested model is forwarded to NVIDIA; model/provider failover requires explicit configuration. Provider-reported model identity can differ and is recorded separately by the live validator.
+- **Auto-compaction** — summarizes or trims long histories to reduce context-overflow failures ([details](#auto-compaction))
 - **Per-key × per-model scoring** — rotation is ordered by a composite score (success rate + median time to first token) learned per key and per model from live traffic: the best key for the requested model goes first
-- **Multi-endpoint routing** — extra NVIDIA endpoints (`endpoints.json` or `OPENVIDIA_UPSTREAM_ENDPOINTS`), a 60s blacklist on ≥500 errors, automatic recovery
+- **Multi-endpoint routing** — extra NVIDIA endpoints (`endpoints.json` or `OPENVIDIA_UPSTREAM_ENDPOINTS`), a 60s blacklist on eligible endpoint errors (model-specific 504 timeouts do not blacklist the shared host), automatic recovery
 - **Multi-node sync via Redis (opt-in)** — cooldowns, invalid keys, pool throttling and model circuit breakers shared across instances ([details](#resilience--scale))
 - **Embedding cache** — `/v1/embeddings` hits are served from memory (TTL 300s) without touching upstream quota
 - **Free-tier provider fallback** — when every NVIDIA key is exhausted, requests fail over to OpenAI-compatible providers declared in `providers.json` ([details](#resilience--scale))
@@ -231,7 +233,7 @@ claude --model openvidia
 
 > The `/v1/messages` endpoint translates Anthropic Messages format ↔ NVIDIA chat/completions bidirectionally — streaming, tool use, and system prompts all work.
 >
-> **Images:** NVIDIA NIM models are text-only. Image blocks (e.g. screenshots) are replaced with `[image omitted: model has no vision]` so the model stays aware of the context and logs a warning in the Activity panel.
+> **Images:** This Anthropic compatibility shim currently replaces image blocks with text placeholders and logs a warning. NVIDIA also serves vision models; this shim limitation must not be interpreted as a provider-wide lack of vision support.
 
 ---
 
@@ -313,7 +315,7 @@ curl http://localhost:1919/v1/chat/completions \
   -d '{"model":"openvidia","messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
-Streaming (SSE) is fully supported — tokens flow through unbuffered.
+Streaming (SSE) responses flow incrementally; model and client protocol capabilities must still be tested.
 
 ---
 
@@ -357,13 +359,13 @@ Request arrives
     │   │                   → network error? 0.5s pause, key untouched (3 consecutive → stop)
     │   └─ (max 5 sends per pass, 3 passes with 1s pause between)
     │
-    └─ All candidates exhausted? → 503 naming the model (never a substitute model)
+    └─ All candidates exhausted? → an explicit error, or a separately configured provider fallback
 ```
 
 ### Health Check
 
 Every 60 seconds:
-1. Finds keys still on cooldown (skips 401/403 invalid keys — they're dead, not temporarily rate-limited)
+1. Finds keys still on cooldown (skips 401/403 invalid keys and unexpired 429 rate-limit cooldowns)
 2. Sends a lightweight `GET /v1/models` probe
 3. If the key responds OK — clears the cooldown (revived)
 4. If still failing — leaves the cooldown in place
@@ -372,7 +374,7 @@ Every 60 seconds:
 
 ## Auto-Compaction
 
-Long conversations eventually exceed the model's context window. Without handling, the upstream returns a `400`, and — since that error is identical on every key — a naive proxy would burn through the whole pool before dying. **OpenVidia never blocks on context overflow.**
+Long conversations eventually exceed the model's context window. Without handling, the upstream returns a `400`, and — since that error is identical on every key — a naive proxy would burn through the whole pool before dying. **Compaction reduces overflow risk; provider limits can still reject a request.**
 
 Before forwarding a request, if the estimated history exceeds a token budget, OpenVidia compacts it:
 
@@ -531,7 +533,7 @@ not something you can see from the outside — the socket just sits there.
 
 Three buttons next to the active model in the dashboard: `auto` (send nothing,
 let the model decide), `on`, `off`. The setting is per-model and stored
-server-side, so all four CLIs pick it up without touching their own configs.
+server-side, so supported request paths apply it without editing client configs.
 
 The **parameter name is configuration, not code**. Providers spell this flag
 differently and rename it every model generation, so `model_options.json`
@@ -555,10 +557,10 @@ has made an explicit choice and wins.
 
 ### Context windows are learned, not configured
 
-A model the proxy has never seen must reach full context with **zero**
-configuration — providers add models continuously, and a hand-maintained
-budget table means every new model runs silently truncated until someone
-notices.
+New models use a conservative context budget until an explicit override or a
+provider overflow rejection supplies a learned limit. This avoids relying on a
+hand-maintained table, but it does not establish the full context capacity in
+advance.
 
 NVIDIA does not advertise the window on `/v1/models`, but it states it exactly
 when a request exceeds it:
@@ -623,7 +625,7 @@ will not silently answer from a different one.
 Constants in `openvidia/proxy_state.py`:
 
 ```python
-MAX_RPM = 28              # Safe margin below NVIDIA's 40 RPM limit
+MAX_RPM = 28              # Initial local ceiling; provider quotas can be lower
 RPM_WINDOW = 60.0         # Sliding window in seconds
 
 COOLDOWN_DURATIONS = {
@@ -734,8 +736,8 @@ scale across machines.
 
 - **Multi-endpoint routing** — by default requests go to
   `integrate.api.nvidia.com`; add endpoints via `endpoints.json` or
-  `OPENVIDIA_UPSTREAM_ENDPOINTS` (comma-separated). A status ≥500 blacklists an
-  endpoint for 60s; a success revives it. Deterministic client errors never
+  `OPENVIDIA_UPSTREAM_ENDPOINTS` (comma-separated). Eligible endpoint failures blacklist an
+  endpoint for 60s; model-specific 504 latency does not. A success revives it. Deterministic client errors never
   retry on another endpoint.
 - **Multi-node sync (Redis, opt-in)** — one proxy per machine, shared state:
   cooldowns, invalid keys, pool throttling and model circuit breakers propagate
@@ -785,7 +787,7 @@ MIT
 
 ---
 
-Built by [Ciro Autuori](https://github.com/ciroautuori).
+Built by [Ciro Autuori](https://github.com/autcir).
 
 
 ## Reliable operation and updates
