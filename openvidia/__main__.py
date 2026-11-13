@@ -559,7 +559,10 @@ def _create_tray(icon_path: str, window, port: int):
         w = window.native
         if w is None:
             return
-        w.show()
+        if w.isMinimized():
+            w.showNormal()
+        else:
+            w.show()
         w.raise_()
         w.activateWindow()
 
@@ -579,6 +582,10 @@ def _create_tray(icon_path: str, window, port: int):
     show_action.triggered.connect(_show_window)
     menu.addAction(show_action)
 
+    hide_action = QAction("Hide dashboard")
+    hide_action.triggered.connect(_hide_window)
+    menu.addAction(hide_action)
+
     menu.addSeparator()
 
     quit_action = QAction("Close dashboard")
@@ -590,17 +597,20 @@ def _create_tray(icon_path: str, window, port: int):
     print("● Tray icon active", flush=True)
 
     def _on_activated(reason):
-        if reason in (
-            QSystemTrayIcon.ActivationReason.Trigger,
-            QSystemTrayIcon.ActivationReason.DoubleClick,
-        ):
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            w = window.native
+            if w is not None and w.isVisible() and not w.isMinimized():
+                _hide_window()
+            else:
+                _show_window()
+        elif reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             _show_window()
 
     tray.activated.connect(_on_activated)
 
     # Global reference to prevent garbage collection of tray/menu/actions
     global _tray_ref, _tray_hide
-    _tray_ref = (tray, menu, show_action, quit_action, _show_window, _on_activated)
+    _tray_ref = (tray, menu, show_action, hide_action, quit_action, _show_window, _on_activated)
     _tray_hide = _hide_window
 
 

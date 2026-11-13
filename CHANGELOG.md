@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.3.0] - Unreleased
 
 ### Fixed
+- Toggle dashboard visibility from the tray icon, add an explicit Hide action, and restore minimized windows correctly.
 - Keep the catalog and healthy models reachable after a model-specific 504; retry configured endpoints when all are temporarily blacklisted.
 - Authenticate dashboard setting changes and report rejected writes without false success.
 - Replace hardcoded model recommendations with observed responses from the live catalog; expose stale selections and refresh failures.

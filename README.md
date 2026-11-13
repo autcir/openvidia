@@ -794,8 +794,10 @@ Built by [Ciro Autuori](https://github.com/autcir).
 
 For an unattended Linux service, install with `./install.sh --headless --service`.
 For a desktop plus managed service, use `./install.sh --desktop --service`.
-The desktop reuses an existing OpenVidia process. Closing the window or choosing
-Quit closes the dashboard only; it does not terminate the proxy. An unrelated
+The desktop reuses an existing OpenVidia process. Clicking its tray icon toggles
+the dashboard; the tray menu also provides Show and Hide dashboard. Restoring a
+minimized window returns it to its normal state. Closing the window or choosing
+Close dashboard exits or hides the view only; it does not terminate the proxy. An unrelated
 process on the configured port is never terminated automatically.
 
 The model browser refreshes the live catalog every 60 seconds and keeps its last
