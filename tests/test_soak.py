@@ -142,14 +142,20 @@ async def test_interrupted_duration_can_never_pass_and_does_not_store_errors(tmp
 async def test_full_duration_and_failure_threshold_determine_result(
     tmp_path, monkeypatch, ok, expected
 ):
+    # Measure controlled duration, not the speed of SSL/client setup on the
+    # CI host. A 3.6ms wall deadline could expire before the first probe.
+    now = [0.0]
+    monkeypatch.setattr(soak.time, "monotonic", lambda: now[0])
+
     async def probe(*args):
+        now[0] = 1.0
         return {"ok": ok, "stages": {"health": ok}}
 
     monkeypatch.setattr(soak, "probe", probe)
     code = await soak.monitor(
         base_url="http://127.0.0.1:1919",
         model="openvidia",
-        hours=0.000001,
+        hours=0.5 / 3600,
         interval=1,
         timeout=1,
         output_dir=tmp_path,
