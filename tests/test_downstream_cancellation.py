@@ -156,3 +156,46 @@ async def test_cancel_during_watcher_cleanup_does_not_transfer_or_leak_response(
         await task
     assert response.is_closed
     assert model_state.key_states["test-key"].in_flight == 0
+
+
+@pytest.mark.asyncio
+async def test_disconnect_during_first_event_read_closes_stream_and_releases_claim():
+    model_state = state()
+    started, closed = asyncio.Event(), asyncio.Event()
+
+    class WaitingStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            started.set()
+            await asyncio.Event().wait()
+            yield b"unreachable"
+
+        async def aclose(self):
+            closed.set()
+
+    async def receive():
+        await started.wait()
+        return {"type": "http.disconnect"}
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, stream=WaitingStream()))
+    ) as client:
+        async with asyncio.timeout(1):
+            with pytest.raises(proxy_app._DownstreamDisconnected):
+                await proxy_app._rotation_until_disconnect(
+                    SimpleNamespace(receive=receive),
+                    model_state,
+                    client,
+                    "https://upstream.example/v1/chat/completions",
+                    {"model": "test/model"},
+                    lambda *_: {},
+                    model_state,
+                    model_state.get_candidate_keys(),
+                    max_attempts=1,
+                    timeout=httpx.Timeout(90),
+                    stream=True,
+                    log_tag="probe",
+                    prepare_response=proxy_app._prepare_chat_stream,
+                )
+    assert closed.is_set()
+    assert model_state.key_states["test-key"].in_flight == 0
+    assert not model_state.is_key_on_cooldown("test-key")

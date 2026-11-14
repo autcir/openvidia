@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -71,6 +72,65 @@ STRIPPED_RESPONSE_HEADERS = {
     "content-length",
     "connection",
 }
+
+
+async def _chat_stream_bytes(response: httpx.Response):
+    """Commit only complete SSE events, preserving their upstream bytes.
+
+    Comments alone do not commit a response. Any data event does, including
+    role and tool deltas. Keep an incomplete trailing event buffered so an
+    interruption cannot expose malformed JSON ahead of our error event.
+    """
+    pending = b""
+    buffered = bytearray()
+    committed = False
+    async for chunk in response.aiter_bytes():
+        pending += chunk
+        while match := re.search(rb"\r?\n\r?\n", pending):
+            event, pending = pending[: match.end()], pending[match.end() :]
+            buffered.extend(event)
+            data = [line[5:].strip() for line in event.splitlines() if line.startswith(b"data:")]
+            committed |= bool(data)
+            if len(buffered) > MAX_BODY_BYTES:
+                raise httpx.RemoteProtocolError("chat stream event exceeds buffer limit")
+            if committed:
+                yield bytes(buffered)
+                buffered.clear()
+            if data == [b"[DONE]"]:
+                return
+        if len(pending) + len(buffered) > MAX_BODY_BYTES:
+            raise httpx.RemoteProtocolError("chat stream event exceeds buffer limit")
+    raise httpx.RemoteProtocolError("chat stream ended before [DONE]")
+
+
+async def _prepare_chat_stream(response: httpx.Response):
+    """Read until output is safe to commit, while rotation still owns retries."""
+    chunks = _chat_stream_bytes(response)
+    try:
+        first = await anext(chunks)
+    except httpx.HTTPError:
+        # Keep diagnostics independent of transport exception text (which may
+        # contain sensitive URLs), and rotate on pre-output read timeouts too.
+        raise httpx.RemoteProtocolError("upstream stream interrupted before output") from None
+    response.extensions["openvidia.chat_stream"] = (first, chunks)
+
+
+async def _response_bytes(response: httpx.Response):
+    prepared = response.extensions.get("openvidia.chat_stream")
+    if prepared is None:
+        async for chunk in response.aiter_bytes():
+            yield chunk
+    else:
+        first, chunks = prepared
+        yield first
+        async for chunk in chunks:
+            yield chunk
+
+
+def _stream_error(message: str) -> bytes:
+    error = {"error": {"message": message, "type": "upstream_error"}}
+    # Two newlines also terminate a partially received upstream SSE event.
+    return ("\n\ndata: " + json.dumps(error) + "\n\ndata: [DONE]\n\n").encode()
 
 
 async def _check_key_health(
@@ -645,6 +705,14 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
             response = await try_fallback(client, payload, provider, stream=streaming)
             if response is None:
                 continue
+            if streaming:
+                try:
+                    await _prepare_chat_stream(response)
+                except BaseException as exc:
+                    await response.aclose()
+                    if isinstance(exc, httpx.HTTPError):
+                        continue
+                    raise
             state.log_cb(f"⇄ fallback → {provider.name}")
             state.stats.success += 1
             headers = {
@@ -661,12 +729,12 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
 
             async def fallback_body(upstream=response):
                 try:
-                    async for chunk in upstream.aiter_bytes():
+                    async for chunk in _response_bytes(upstream):
                         if await request.is_disconnected():
                             break
                         yield chunk
                 except httpx.HTTPError:
-                    yield b'\ndata: {"error":"fallback stream interrupted"}\n\n'
+                    yield _stream_error("fallback stream interrupted")
                 finally:
                     await upstream.aclose()
 
@@ -873,6 +941,13 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
                     method=request.method,
                     content=body if body else None,
                     probe_timeout=_MODEL_PROBE_TIMEOUT,
+                    prepare_response=(
+                        _prepare_chat_stream
+                        if full_path.endswith("chat/completions")
+                        and isinstance(payload, dict)
+                        and payload.get("stream")
+                        else None
+                    ),
                 )
             except _DownstreamDisconnected:
                 return Response(status_code=499)
@@ -916,16 +991,16 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
                     # default, and content-encoding is stripped from the
                     # forwarded headers above. Passing the raw stream through
                     # would hand the client compressed bytes labelled identity.
-                    async for chunk in resp.aiter_bytes():
+                    async for chunk in _response_bytes(resp):
                         if await request.is_disconnected():
                             break
                         yield chunk
-                except httpx.HTTPError as e:
+                except httpx.HTTPError:
                     # The client already has a 200 and some bytes, so there is
                     # no status left to change. Say so in the stream instead of
                     # closing cleanly, which reads as a complete answer.
-                    state.log_cb(f"key[{orig_idx}] stream error: {e}")
-                    yield b'\ndata: {"error":"upstream stream interrupted"}\n\n'
+                    state.log_cb(f"key[{orig_idx}] stream interrupted")
+                    yield _stream_error("upstream stream interrupted")
                 finally:
                     state.end_in_flight(key)
                     await resp.aclose()

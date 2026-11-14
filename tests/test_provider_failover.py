@@ -32,6 +32,8 @@ class TrackedStream(httpx.AsyncByteStream):
         for chunk in self.chunks:
             yield chunk
         if self.fail:
+            if isinstance(self.fail, httpx.HTTPError):
+                raise self.fail
             raise httpx.ReadError("upstream disconnected")
 
     async def aclose(self):
@@ -172,7 +174,11 @@ async def test_streaming_tool_call_and_tool_result_survive_provider_model_mappin
 async def test_midstream_failure_closes_response_and_never_replays_tool_calls(monkeypatch, primary):
     seen = []
     stream = TrackedStream(
-        [b'data: {"choices":[{"delta":{"tool_calls":[{"id":"call-side-effect"}]}}]}\n\n'], fail=True
+        [
+            b'data: {"choices":[{"delta":{"tool_calls":[{"id":"call-side-effect"}]}}]}\n\n',
+            b'data: {"choices":',
+        ],
+        fail=True,
     )
 
     def handler(request):
@@ -187,7 +193,15 @@ async def test_midstream_failure_closes_response_and_never_replays_tool_calls(mo
         assert response.status_code == 200
         assert "call-side-effect" in response.text
         assert "stream interrupted" in response.text
-        assert "[DONE]" not in response.text
+        events = [line[6:] for line in response.text.splitlines() if line.startswith("data: ")]
+        assert events[-1] == "[DONE]"
+        assert len(events) == 3
+        assert json.loads(events[0])["choices"][0]["delta"]["tool_calls"]
+        error = json.loads(events[-2])["error"]
+        assert error == {
+            "message": f"{'upstream' if primary else 'fallback'} stream interrupted",
+            "type": "upstream_error",
+        }
         if primary:
             assert state.key_states["nvapi-test"].in_flight == 0
     assert seen == ["integrate.api.nvidia.com" if primary else "backup.example"]
@@ -278,3 +292,120 @@ async def test_failed_backup_moves_to_next_provider_before_any_output(monkeypatc
         assert response.headers["x-openvidia-provider"] == "backup"
     assert seen == ["dead.example", "backup.example"]
     assert failed_stream.closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "chunks,fail",
+    [
+        ([], True),
+        ([b": ping\n\n", b'data: {"choices":'], True),
+        ([], False),
+        ([], httpx.ReadTimeout("read timed out")),
+    ],
+)
+async def test_interruption_before_first_event_rotates_to_another_key(monkeypatch, chunks, fail):
+    seen, streams = [], []
+    good = b'data: {"choices":[{"delta":{"content":"recovered"}}]}\n\ndata: [DONE]\n\n'
+
+    def handler(request):
+        seen.append(request.headers["authorization"])
+        stream = TrackedStream(chunks, fail=fail) if len(seen) == 1 else TrackedStream([good])
+        streams.append(stream)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
+
+    async with app_client(monkeypatch, handler, mode="healthy", keys_count=2) as (client, state):
+        response = await client.post("/v1/chat/completions", json={**PAYLOAD, "stream": True})
+        assert response.status_code == 200
+        assert response.content == good
+        assert state.stats.success == 1
+        assert all(key.in_flight == 0 for key in state.key_states.values())
+    assert len(seen) == 2 and seen[0] != seen[1]
+    assert all(stream.closed for stream in streams)
+
+
+@pytest.mark.asyncio
+async def test_preoutput_interruption_spends_existing_attempt_budget(monkeypatch):
+    seen, streams = [], []
+
+    def handler(request):
+        seen.append(request.url.host)
+        stream = TrackedStream([], fail=True)
+        streams.append(stream)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
+
+    async with app_client(monkeypatch, handler, mode="healthy", keys_count=15) as (client, state):
+        monkeypatch.setattr(proxy_app, "load_provider_configs", lambda: [])
+        response = await client.post("/v1/chat/completions", json={**PAYLOAD, "stream": True})
+        assert response.status_code == 503
+        assert all(key.in_flight == 0 for key in state.key_states.values())
+    assert len(seen) == proxy_app._MAX_ROTATE_ATTEMPTS
+    assert all(stream.closed for stream in streams)
+
+
+@pytest.mark.asyncio
+async def test_backup_interruption_before_first_event_tries_next_provider(monkeypatch):
+    seen, streams = [], []
+
+    def handler(request):
+        seen.append(request.url.host)
+        stream = (
+            TrackedStream([], fail=True) if len(seen) == 1 else TrackedStream([b"data: [DONE]\n\n"])
+        )
+        streams.append(stream)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
+
+    async with app_client(monkeypatch, handler) as (client, _):
+        monkeypatch.setattr(
+            proxy_app,
+            "load_provider_configs",
+            lambda: [
+                ProviderConfig("dead", "https://dead.example/v1", "key"),
+                PROVIDER,
+            ],
+        )
+        response = await client.post("/v1/chat/completions", json={**PAYLOAD, "stream": True})
+        assert response.content == b"data: [DONE]\n\n"
+        assert response.headers["x-openvidia-provider"] == "backup"
+    assert seen == ["dead.example", "backup.example"]
+    assert all(stream.closed for stream in streams)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("primary", [False, True])
+async def test_clean_eof_without_done_is_reported_after_output(monkeypatch, primary):
+    seen = []
+    chunk = b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+    stream = TrackedStream([chunk])
+
+    def handler(request):
+        seen.append(request.url.host)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
+
+    async with app_client(monkeypatch, handler, mode="healthy" if primary else "throttled") as (
+        client,
+        _,
+    ):
+        response = await client.post("/v1/chat/completions", json={**PAYLOAD, "stream": True})
+        assert response.content.startswith(chunk)
+        assert '"type": "upstream_error"' in response.text
+        assert response.text.endswith("data: [DONE]\n\n")
+    assert len(seen) == 1
+    assert stream.closed
+
+
+@pytest.mark.asyncio
+async def test_fragmented_crlf_stream_is_preserved_without_error(monkeypatch):
+    content = (
+        b': ping\r\n\r\ndata: {"choices":[{"delta":{"content":"ok"}}]}\r\n\r\ndata: [DONE]\r\n\r\n'
+    )
+    stream = TrackedStream([bytes([byte]) for byte in content])
+
+    def handler(_request):
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
+
+    async with app_client(monkeypatch, handler, mode="healthy") as (client, state):
+        response = await client.post("/v1/chat/completions", json={**PAYLOAD, "stream": True})
+        assert response.content == content
+        assert state.key_states["nvapi-test"].in_flight == 0
+    assert stream.closed

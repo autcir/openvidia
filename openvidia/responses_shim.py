@@ -197,6 +197,7 @@ async def _rotation_phase(
     method="POST",
     content=None,
     probe_timeout=None,
+    prepare_response=None,
 ):
     """Single bounded rotation phase. Returns (resp_or_None, used_key, used_idx).
 
@@ -205,6 +206,9 @@ async def _rotation_phase(
         content: raw body bytes (used by catch-all; when None, json=payload is used).
         probe_timeout: if given, the first attempt uses this timeout to
             detect dead models; subsequent attempts use ``timeout``.
+        prepare_response: optional async callback that prepares a successful
+            response before returning it. Pre-output HTTP errors spend this
+            phase's existing attempt budget and release the failed response.
         outcome_box: optional dict filled with the last upstream status and
             error body. The caller needs it to answer with what the provider
             actually said instead of a generic "all keys exhausted", which is
@@ -271,6 +275,13 @@ async def _rotation_phase(
                 resp = await _send_once(
                     client, method, upstream, payload, content, hdrs, _send_timeout, stream
                 )
+                if resp.status_code == 200 and prepare_response is not None:
+                    try:
+                        await prepare_response(resp)
+                    except BaseException:
+                        await resp.aclose()
+                        resp = None
+                        raise
             except httpx.ReadTimeout:
                 # The key connected and the upstream ACCEPTED the request — it is
                 # simply still thinking. Two things must NOT happen here:
