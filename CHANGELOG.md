@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.3.0] - Unreleased
 
 ### Fixed
+- Prevent dashboard availability checks from crashing on null/reasoning-only responses; use the configured proxy path and a bounded deadline.
+- Keep metadata probes from clearing inference cooldowns, including failures arriving during a probe.
+- Reject malformed validation responses and prevent fallback models from receiving another model’s validation evidence.
+- Preserve log occurrence times when replaying activity history, and distinguish metadata reachability from inference availability.
+- Bound background compaction jobs, cancel owned jobs on shutdown, and consume late Python 3.14 task failures.
 - Toggle dashboard visibility from the tray icon, add an explicit Hide action, and restore minimized windows correctly.
 - Keep the catalog and healthy models reachable after a model-specific 504; retry configured endpoints when all are temporarily blacklisted.
 - Authenticate dashboard setting changes and report rejected writes without false success.
@@ -20,7 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Opt-in streaming/tool-result model validator with sanitized identity evidence, plus dated API and real OpenCode integration reports.
-- Default Recent model picker using official Build modification dates and exact inference API intersections; preserve the complete catalog under All.
+- Default Tested tools filter with expiring local streaming/tool evidence, authenticated Check tools action, and separately attested OpenCode badges.
+- Recent model picker using official Build modification dates and exact inference API intersections; preserve the complete catalog under All.
 - Headless base installation and optional desktop dependencies.
 - Verified isolated release installation, atomic activation, rollback, and opt-in daily update checks.
 - Independent health/readiness routes, isolated real-process lifecycle tests, and a resumeless duration-audited soak monitor.

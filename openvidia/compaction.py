@@ -74,6 +74,9 @@ _DEFAULTS = {
     # the incremental case — the client is protected by inline_deadline, not
     # by this. Too low here means the summary never completes at all.
     "summarize_timeout": 45.0,
+    # Wall-clock bound for the entire background job, including waiting for
+    # an upstream concurrency slot and retrying a retired summary model.
+    "summary_job_timeout": 90.0,
     # How long the *client request* is willing to wait for a summary. Past
     # this the request is served from the fallback ladder while the
     # summarize keeps running in the background for the next turn.
@@ -342,6 +345,26 @@ _rolling: dict[str, tuple[int, str, str]] = {}
 _ROLLING_CAP = 256
 # ck -> (task, covered_count_the_task_will_cover)
 _inflight: dict[str, tuple[asyncio.Task, int]] = {}
+_summary_clients: dict[asyncio.Task, object] = {}
+
+
+async def cancel_pending_summaries(client: object | None = None) -> None:
+    """Drain background jobs before their owning upstream client is closed.
+
+    Multiple app instances can share this module. Cancel only this client's
+    jobs (or all jobs on the current event loop when no client is supplied).
+    """
+    loop = asyncio.get_running_loop()
+    tasks = [
+        task
+        for task, owner in list(_summary_clients.items())
+        if task.get_loop() is loop and (client is None or owner is client)
+    ]
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _cache_put(ck: str, covered: int, summary: str, fp: str) -> None:
@@ -677,18 +700,31 @@ def _start_summarize(
 
     async def _run() -> str:
         nonlocal used
+        job_timeout = cfg.get("summary_job_timeout", _DEFAULTS["summary_job_timeout"])
+        deadline = asyncio.timeout(job_timeout)
         try:
-            return await _attempt(model)
-        except ModelNotFoundError:
-            if not fallback_model or fallback_model == model:
-                raise
-            log(f"⧉ compaction: summary_model {model!r} not found upstream → {fallback_model}")
-            used = fallback_model
-            return await _attempt(fallback_model)
+            async with deadline:
+                try:
+                    return await _attempt(model)
+                except ModelNotFoundError:
+                    if not fallback_model or fallback_model == model:
+                        raise
+                    log(
+                        f"⧉ compaction: summary_model {model!r} not found upstream → {fallback_model}"
+                    )
+                    used = fallback_model
+                    return await _attempt(fallback_model)
+        except TimeoutError:
+            if deadline.expired():
+                raise TimeoutError(
+                    f"summary exceeded {job_timeout:g}s total job deadline"
+                ) from None
+            raise
 
     task = asyncio.ensure_future(_run())
 
     def _done(t: asyncio.Task) -> None:
+        _summary_clients.pop(t, None)
         cur = _inflight.get(ck)
         if cur and cur[0] is t:
             _inflight.pop(ck, None)
@@ -697,7 +733,9 @@ def _start_summarize(
         err = t.exception()
         elapsed = time.monotonic() - started
         if err is not None:
-            log(f"⧉ compaction: summarize failed ({err}) in {elapsed:.1f}s → fallback")
+            log(
+                f"⧉ compaction: summarize failed ({type(err).__name__}: {err}) in {elapsed:.1f}s → fallback"
+            )
             return
         summary = t.result()
         _cache_put(ck, covered_target, summary, fp)
@@ -708,6 +746,7 @@ def _start_summarize(
 
     task.add_done_callback(_done)
     _inflight[ck] = (task, covered_target)
+    _summary_clients[task] = client
     return task
 
 
@@ -821,17 +860,17 @@ async def maybe_compact(
 
     if task is not None:
         deadline = cfg.get("inline_deadline", _DEFAULTS["inline_deadline"])
-        # Shield: if the client disconnects mid-wait the summarize must
-        # survive to populate the cache for the next turn.
-        try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=deadline)
-        except TimeoutError:
+        # asyncio.wait neither cancels the job on timeout/client disconnect
+        # nor leaves a shield wrapper behind. Python 3.14 logs a late shielded
+        # exception even when our owner callback has already handled it.
+        done, _ = await asyncio.wait({task}, timeout=deadline)
+        if not done:
             log(
                 f"⧉ compaction: summarize still running (>{deadline:.0f}s) "
                 f"→ serving now, summary lands next turn"
             )
-        except Exception:  # noqa: BLE001 — logged by the task callback
-            pass
+        # The owner callback observes/logs job failures once and fills the
+        # cache on success; a failed/cancelled job takes the normal trim path.
         fresh = _cache_get(ck, rest)
         if fresh and fresh[0] >= covered:
             covered, base = fresh

@@ -1,0 +1,39 @@
+[
+  {
+    "model": "minimaxai/minimax-m3.1-flash",
+    "http_status": 200,
+    "result": {
+      "ok": true,
+      "model": "minimaxai/minimax-m3.1-flash",
+      "validation": {
+        "status": "passed",
+        "tested_at": "2026-11-14T07:12:38.914301+00:00",
+        "expires_at": "2026-11-14T13:12:38.914301+00:00",
+        "stream": true,
+        "tool_call": true,
+        "tool_result": true,
+        "opencode": false
+      }
+    },
+    "seconds": 3.84
+  },
+  {
+    "model": "z-ai/glm-5.3-flash",
+    "http_status": 200,
+    "result": {
+      "ok": true,
+      "model": "z-ai/glm-5.3-flash",
+      "validation": {
+        "status": "failed",
+        "tested_at": "2026-11-14T07:13:38.928864+00:00",
+        "expires_at": "2026-11-14T13:13:38.928864+00:00",
+        "stream": false,
+        "tool_call": false,
+        "tool_result": false,
+        "opencode": false,
+        "reason": "timeout"
+      }
+    },
+    "seconds": 60.06
+  }
+]

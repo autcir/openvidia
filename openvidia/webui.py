@@ -17,11 +17,13 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
 from . import config
-from .config import UPSTREAM_BASE
 from .proxy_state import ProxyState
+
+MODEL_PROBE_TIMEOUT = 45.0
+
 
 # --------------------------------------------------------------------------- #
 # Static dashboard bundle
@@ -403,55 +405,137 @@ def attach_webui(app: FastAPI, state: ProxyState, web_dir: Path) -> None:
         )
 
     # ----------------------------------------------------------------------- #
-    # Model probe — fire a 5-token chat completion against upstream
+    # Model probe — exercise the same route and policies as local clients
     # ----------------------------------------------------------------------- #
 
     @app.post("/api/test-model")
-    async def api_test_model(request: Request) -> dict:
-        body = await request.json()
-        model_id = body.get("model", "")
-        if not model_id:
-            return {"ok": False, "error": "no model specified"}
+    async def api_test_model(request: Request) -> Response:
+        def failure(code: str, detail: str, *, model: str | None = None, status: int = 200):
+            result = {"ok": False, "error": code, "detail": detail}
+            if model is not None:
+                result["model"] = model
+            return JSONResponse(result, status_code=status)
 
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeError):
+            return failure("invalid_request", "Send a JSON object with a model ID.", status=400)
+        model_id = body.get("model") if isinstance(body, dict) else None
+        if not isinstance(model_id, str) or not config.is_valid_model_id(model_id):
+            return failure("invalid_request", "A valid model ID is required.", status=400)
         async with state.lock:
-            keys = list(state.keys)
-        if not keys:
-            return {"ok": False, "error": "no keys"}
+            if not state.keys:
+                return failure("no_keys", "No API keys are configured.", model=model_id)
 
         payload = {
             "model": model_id,
-            "messages": [{"role": "user", "content": "ok"}],
-            "max_completion_tokens": 5,
+            "messages": [{"role": "user", "content": "Reply exactly OK."}],
+            "max_tokens": 256,
+            "stream": False,
         }
-        async with httpx.AsyncClient(timeout=httpx.Timeout(15)) as client:
-            for key in keys:
-                try:
-                    r = await client.post(
-                        UPSTREAM_BASE + "chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {key}",
-                            "Content-Type": "application/json",
-                        },
+        try:
+            # A fixed loopback HTTP request exercises the ordinary proxy while
+            # enforcing socket cancellation independently of its ASGI cleanup.
+            # No external base URL, credentials or environment proxy is accepted.
+            async with asyncio.timeout(MODEL_PROBE_TIMEOUT):
+                async with httpx.AsyncClient(
+                    transport=getattr(app.state, "probe_transport", None),
+                    base_url=f"http://127.0.0.1:{state.port}",
+                    timeout=MODEL_PROBE_TIMEOUT,
+                    trust_env=False,
+                ) as local:
+                    response = await local.post(
+                        "/v1/chat/completions",
                         json=payload,
+                        headers={"X-OpenVidia-Strict-Model": "1"},
                     )
-                    if r.is_success:
-                        d = r.json()
-                        txt = d.get("choices", [{}])[0].get("message", {}).get("content", "")
-                        return {"ok": True, "model": model_id, "response": txt[:100]}
-                    # 400/429 are key/model-level rejections worth surfacing;
-                    # everything else is treated as transient and skipped.
-                    if r.status_code != 400 and r.status_code != 429:
-                        continue
-                except httpx.HTTPError:
-                    continue
-                return {
-                    "ok": False,
+            status = response.status_code
+            if status == 429:
+                return failure(
+                    "rate_limited", "The provider is rate limited; retry later.", model=model_id
+                )
+            if status in (408, 504):
+                return failure(
+                    "timeout", "The model did not answer within the probe deadline.", model=model_id
+                )
+            if status in (401, 403):
+                return failure(
+                    "authentication_failed",
+                    "The provider rejected the configured credentials.",
+                    model=model_id,
+                )
+            if status in (400, 404, 413, 422):
+                return failure(
+                    "rejected", "The provider rejected this model or probe request.", model=model_id
+                )
+            if not response.is_success:
+                return failure(
+                    "unavailable",
+                    "The model is temporarily unavailable through the proxy.",
+                    model=model_id,
+                )
+            data = response.json()
+            choices = data.get("choices") if isinstance(data, dict) else None
+            if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                return failure(
+                    "invalid_response",
+                    "The provider returned no valid completion choice.",
+                    model=model_id,
+                )
+            message = choices[0].get("message")
+            if not isinstance(message, dict):
+                return failure(
+                    "invalid_response",
+                    "The provider returned no valid completion message.",
+                    model=model_id,
+                )
+            content = message.get("content")
+            if content is not None and not isinstance(content, str):
+                return failure(
+                    "invalid_response",
+                    "The provider returned an unsupported completion format.",
+                    model=model_id,
+                )
+            if not content or not content.strip():
+                if message.get("tool_calls"):
+                    return failure(
+                        "tool_only",
+                        "The model returned tool calls instead of a text answer.",
+                        model=model_id,
+                    )
+                if message.get("reasoning_content") or message.get("reasoning"):
+                    return failure(
+                        "reasoning_only",
+                        "The model produced reasoning without a text answer within the probe budget.",
+                        model=model_id,
+                    )
+                return failure(
+                    "empty_response", "The model returned no usable text answer.", model=model_id
+                )
+            return JSONResponse(
+                {
+                    "ok": True,
                     "model": model_id,
-                    "error": "unavailable",
-                    "detail": r.text[:200],
+                    "response": "Usable text completion received.",
+                    "output_chars": len(content),
                 }
-
-        return {"ok": False, "model": model_id, "error": "all keys failed"}
+            )
+        except (TimeoutError, httpx.TimeoutException):
+            return failure(
+                "timeout", "The model did not answer within the probe deadline.", model=model_id
+            )
+        except httpx.HTTPError:
+            return failure(
+                "connection_error",
+                "The proxy could not complete the model request.",
+                model=model_id,
+            )
+        except (ValueError, UnicodeError):
+            return failure(
+                "invalid_response",
+                "The provider returned an invalid completion response.",
+                model=model_id,
+            )
 
     # ----------------------------------------------------------------------- #
     # Presets (saved key sets)
@@ -481,29 +565,28 @@ def attach_webui(app: FastAPI, state: ProxyState, web_dir: Path) -> None:
     @app.get("/api/logs/stream")
     async def log_stream(request: Request) -> StreamingResponse:
         async def event_generator():
-            q: asyncio.Queue[str] = asyncio.Queue()
-
-            # Replay the current buffer first so a reconnect doesn't lose
-            # the recent history visible before the connection opened.
-            buf = list(state.log_buffer)
-            for msg in buf:
-                yield f"data: {json.dumps({'msg': msg})}\n\n"
-
-            # Register for live push (no polling) and stream until the
-            # client disconnects; heartbeats keep the socket warm during
-            # quiet periods without violating the SSE contract.
-            state.listeners.add(q)
+            queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=500)
+            # Subscribe first so events arriving while history is being sent
+            # enter the live queue. Monotonic IDs remove any replay overlap.
+            history = state.subscribe_logs(queue)
+            last_id = 0
             try:
+                for event in history:
+                    last_id = max(last_id, event["id"])
+                    yield f"data: {json.dumps(event)}\n\n"
                 while True:
                     if await request.is_disconnected():
                         break
                     try:
-                        msg = await asyncio.wait_for(q.get(), timeout=2.0)
-                        yield f"data: {json.dumps({'msg': msg})}\n\n"
+                        event = await asyncio.wait_for(queue.get(), timeout=2.0)
+                        if event["id"] <= last_id:
+                            continue
+                        last_id = event["id"]
+                        yield f"data: {json.dumps(event)}\n\n"
                     except TimeoutError:
                         yield ": heartbeat\n\n"
             finally:
-                state.listeners.discard(q)
+                state.unsubscribe_logs(queue)
 
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 

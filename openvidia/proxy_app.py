@@ -20,6 +20,7 @@ from .anthropic_shim import handle_anthropic_messages
 from .catalog import BuildCatalog
 from .config import UPSTREAM_BASE
 from .embedding_cache import EmbeddingCache
+from .model_validation import ValidationStore
 from .provider_fallback import load_provider_configs, try_fallback
 from .proxy_state import ProxyState
 from .redis_sync import RedisSync
@@ -94,11 +95,12 @@ async def _check_key_health(
 async def _health_check_all(
     state: ProxyState, client: httpx.AsyncClient, force: bool = False
 ) -> None:
-    """Probe cooldown-expired keys in parallel with concurrency bounds.
+    """Observe metadata reachability without changing inference health.
 
-    Serial probing was fine for <5 keys but stalls pre-warm beyond ~2s when
-    many keys are dead. We batch them with asyncio.gather bounded by a
-    Semaphore to prevent blasting dozens of requests at once.
+    GET /models cannot establish inference authentication, quota or worker
+    availability. Its success and failure therefore never clear, replace or
+    extend inference cooldowns, even during forced probes or concurrent sends.
+    Probes are batched behind a semaphore to bound metadata traffic.
     """
     targets: list[str] = []
     for key in state.keys:
@@ -132,23 +134,11 @@ async def _health_check_all(
         return_exceptions=True,
     )
 
-    revived = 0
-    for key, healthy in zip(targets, results, strict=True):
-        if isinstance(healthy, Exception):
-            healthy = False
-        if healthy:
-            # Reachability restored, throughput unproven: clear the cooldown but
-            # leave the adaptive RPM ceiling where the pool learned to put it.
-            state.restore_key(key, rehab_rpm=False)
-            revived += 1
-        elif force:
-            state.mark_key_failed(key)
-    n_unhealthy = sum(1 for k in state.keys if state.is_key_on_cooldown(k))
-    all_ok = len(state.keys) - n_unhealthy
+    n_unhealthy = sum(1 for key in state.keys if state.is_key_on_cooldown(key))
     state.log_cb(
-        f"⚕ health: {all_ok}/{len(state.keys)} OK"
-        + (f", {n_unhealthy} on cooldown" if n_unhealthy else "")
-        + (f", {revived} revived" if revived else "")
+        f"⚕ metadata probe: {sum(result is True for result in results)}/{len(targets)} reachable"
+        + (f", {n_unhealthy} inference cooldowns unchanged" if n_unhealthy else "")
+        + "; inference availability must be checked separately"
     )
 
 
@@ -173,10 +163,9 @@ async def _background_health_check(state: ProxyState, client: httpx.AsyncClient)
 
 
 # ── Upstream (NVIDIA) probe ────────────────────────────────────────────
-# The dashboard needs one unambiguous signal that answers "is it us or is it
-# NVIDIA?" A cheap GET /v1/models on one healthy key — short timeout, no RPM
-# budget spent on chat — is enough to tell the two apart. Results land in
-# state.upstream so /api/status and the web UI can render them.
+# A cheap GET /v1/models measures metadata reachability only. It cannot prove
+# that inference workers, model-specific quotas or authentication are healthy.
+# Results land in state.upstream and are labelled as metadata in the UI.
 
 _UPSTREAM_PROBE_INTERVAL = 30.0
 _UPSTREAM_PROBE_TIMEOUT = 8.0
@@ -184,7 +173,7 @@ _UPSTREAM_SLOW_MS = 1500.0
 
 
 async def _probe_upstream(state: ProxyState, client: httpx.AsyncClient) -> None:
-    """One reachability probe of the NVIDIA endpoint."""
+    """One metadata reachability probe; not an inference or key-health test."""
     keys = [k for k in state.keys if state.is_key_healthy(k) and state.key_can_send_rpm(k)]
     if not keys:
         state.set_upstream_status("unknown", 0.0, "no healthy key to probe with")
@@ -220,7 +209,7 @@ async def _probe_upstream(state: ProxyState, client: httpx.AsyncClient) -> None:
 
 
 async def _background_upstream_probe(state: ProxyState, client: httpx.AsyncClient) -> None:
-    """Every 30s, measure whether NVIDIA itself is reachable."""
+    """Every 30s, measure whether NVIDIA model metadata is reachable."""
     try:
         while True:
             await _probe_upstream(state, client)
@@ -314,6 +303,55 @@ class LocalOnlyMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+class _DownstreamDisconnected(Exception):
+    """The peer left before inference response headers were available."""
+
+
+async def _rotation_until_disconnect(request: Request, state: ProxyState, *args, **kwargs):
+    """Cancel pending inference and release its claim when a client leaves."""
+    operation = asyncio.create_task(_rotation_phase(*args, **kwargs))
+
+    async def watch_disconnect():
+        # proxy_handler has already consumed the complete request body. No
+        # stream reader competes with this watcher until rotation returns.
+        while True:
+            message = await request.receive()
+            if message["type"] == "http.disconnect":
+                return
+
+    watcher = asyncio.create_task(watch_disconnect())
+    returned = False
+    try:
+        done, _pending = await asyncio.wait(
+            [operation, watcher], return_when=asyncio.FIRST_COMPLETED
+        )
+        if watcher in done:
+            watcher.result()
+            raise _DownstreamDisconnected()
+        result = operation.result()
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
+        returned = True
+        return result
+    finally:
+        if not returned:
+            watcher.cancel()
+            if not operation.done():
+                operation.cancel()
+            results = await asyncio.gather(operation, watcher, return_exceptions=True)
+            # A 200 may have arrived in the same event-loop turn as disconnect.
+            # Rotation transfers that open response and key claim to its caller.
+            result = results[0]
+            if isinstance(result, tuple) and len(result) == 3:
+                response, key, _index = result
+                if response is not None:
+                    try:
+                        await response.aclose()
+                    finally:
+                        if key:
+                            state.end_in_flight(key)
+
+
 def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
     limits = httpx.Limits(max_keepalive_connections=100, max_connections=200, keepalive_expiry=30.0)
     proxy_url = config.outbound_proxy()
@@ -326,6 +364,8 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
     router = EndpointRouter(config.upstream_endpoints())
     emb_cache = EmbeddingCache()
     build_catalog = BuildCatalog()
+    validations = ValidationStore()
+    validation_lock = asyncio.Lock()
     _redis_url = config.redis_url()
     rs = RedisSync(_redis_url) if _redis_url else None
     if rs is not None:
@@ -337,7 +377,7 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
             state.log_cb("⚕ pre-warm: checking all keys...")
             await _health_check_all(state, client, force=True)
             state.log_cb(
-                f"⚕ pre-warm done ({sum(1 for k in state.keys if state.is_key_healthy(k))}/{len(state.keys)} healthy)"
+                f"⚕ pre-warm done ({len(state.keys)} keys loaded; metadata reachability is not a model test)"
             )
 
         asyncio.create_task(_pre_warm())
@@ -353,9 +393,53 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
             state.upstream_task.cancel()
         if rs is not None:
             await rs.close()
+        from .compaction import cancel_pending_summaries
+
+        await cancel_pending_summaries(client)
         await client.aclose()
 
     app = FastAPI(lifespan=lifespan)
+
+    @app.post("/api/validate-model")
+    async def validate_model(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeError):
+            body = None
+        model = body.get("model") if isinstance(body, dict) else None
+        if not isinstance(model, str) or "/" not in model or not config.is_valid_model_id(model):
+            return JSONResponse(
+                {"ok": False, "error": "A valid provider/model ID is required."}, status_code=400
+            )
+        if validation_lock.locked():
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "A tool check is already running. Try again after it finishes.",
+                },
+                status_code=409,
+            )
+        from .soak import probe
+
+        async with validation_lock:
+            async with httpx.AsyncClient(
+                transport=getattr(app.state, "probe_transport", None),
+                base_url=f"http://127.0.0.1:{state.port}",
+                timeout=60,
+                trust_env=False,
+            ) as local:
+                outcome = await probe(local, model, 60)
+            try:
+                row = await asyncio.to_thread(validations.record, model, outcome)
+            except (OSError, ValueError):
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": "Could not save this model check. Check local configuration permissions.",
+                    },
+                    status_code=503,
+                )
+        return JSONResponse({"ok": True, "model": model, "validation": row})
 
     @app.get("/health")
     async def health() -> dict:
@@ -451,6 +535,11 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
                             data["data"], data["catalog"] = await build_catalog.enrich(
                                 client, data["data"]
                             )
+                            evidence = validations.load()
+                            for model in data["data"]:
+                                model.pop("validation", None)  # Evidence is local only.
+                                if model.get("id") in evidence:
+                                    model["validation"] = evidence[model["id"]]
                             # Rebuild the compatibility list from the same
                             # enriched source rather than leave divergent lists.
                             data.pop("models", None)
@@ -549,6 +638,8 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
         already have caused a side effect. Forward SSE incrementally rather
         than buffering it and labelling it JSON.
         """
+        if request.headers.get("X-OpenVidia-Strict-Model") == "1":
+            return None
         streaming = bool(payload.get("stream"))
         for provider in load_provider_configs():
             response = await try_fallback(client, payload, provider, stream=streaming)
@@ -679,6 +770,8 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
             _fallback_mode = _opts.get("fallback", "off")
             _per = (_opts.get("per_model") or {}).get(requested_model, {})
             _fallback_mode = _per.get("fallback", _fallback_mode)
+            if request.headers.get("X-OpenVidia-Strict-Model") == "1":
+                _fallback_mode = "off"
             if _fallback_mode == "off":
                 state.log_cb(f"🔴 {requested_model} circuit OPEN, fallback=off → 503")
                 if full_path.endswith("chat/completions"):
@@ -762,22 +855,27 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
         used_idx = -1
         for endpoint in endpoint_urls:
             url = endpoint + nv_path
-            resp, used_key, used_idx = await _rotation_phase(
-                client,
-                url,
-                _payload_for_rotation,
-                _hdr,
-                state,
-                candidates,
-                max_attempts=_MAX_ROTATE_ATTEMPTS,
-                timeout=_ROTATE_SEND_TIMEOUT,
-                stream=not is_embeddings,
-                log_tag="catch-all",
-                outcome_box=_outcome,
-                method=request.method,
-                content=body if body else None,
-                probe_timeout=_MODEL_PROBE_TIMEOUT,
-            )
+            try:
+                resp, used_key, used_idx = await _rotation_until_disconnect(
+                    request,
+                    state,
+                    client,
+                    url,
+                    _payload_for_rotation,
+                    _hdr,
+                    state,
+                    candidates,
+                    max_attempts=_MAX_ROTATE_ATTEMPTS,
+                    timeout=_ROTATE_SEND_TIMEOUT,
+                    stream=not is_embeddings,
+                    log_tag="catch-all",
+                    outcome_box=_outcome,
+                    method=request.method,
+                    content=body if body else None,
+                    probe_timeout=_MODEL_PROBE_TIMEOUT,
+                )
+            except _DownstreamDisconnected:
+                return Response(status_code=499)
             if resp is not None and resp.status_code == 200:
                 router.mark_success(url)
                 break
