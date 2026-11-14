@@ -404,8 +404,9 @@ async def _rotation_phase(
             # model is the bottleneck, not the key, so trying another key just
             # spreads the same 504 across the pool faster.
             if err_status in _GATEWAY_TIMEOUTS:
+                condition = "service unavailable" if err_status == 503 else "gateway timeout"
                 state.log_cb(
-                    f"  {log_tag}: HTTP {err_status} gateway timeout — key[{idx}] 30s cooldown"
+                    f"  {log_tag}: HTTP {err_status} {condition} — key[{idx}] 30s cooldown"
                 )
                 state.mark_key_failed(k, status=err_status, retry_after=30)
                 # Gateway failures still spend the bounded attempt budget.

@@ -74,11 +74,14 @@ instructions. Tests must isolate user configuration and use mocked transports
 for upstream requests. Treat live API checks and long operational probes as
 separate validation with explicit limits and reports.
 
-The dashboard defaults to **Recent**, ordered by official Build update dates
-for models in the live API catalog. **All** retains the full API catalog;
-**Answered** uses observed traffic. Do not hardcode changing model rankings
-or invent API IDs from preview cards. Build update dates are not benchmark
-scores or guaranteed release dates.
+The dashboard defaults to **Tested tools**: local evidence of successful streaming,
+forced tool calls and tool-result round trips, expiring after six hours. Current
+model failures exclude entries; historical failure ratios do not prevent recovery.
+**Check tools** runs an authenticated, bounded protocol probe; the availability
+button is a separate check. The OpenCode badge requires actual client evidence.
+**Recent** orders live API models by official Build update dates; **All** retains
+the full API catalog. Do not hardcode changing model rankings or invent API IDs
+from preview cards. Build dates and successful probes are not quality benchmarks.
 
 ## Automation
 
@@ -101,6 +104,6 @@ Keys and administrative tokens live under the platform configuration directory
 (`~/.config/openvidia/` on Linux by default). Never commit them or include them
 in reports. Important files include `keys.json`, `control_token`, `presets.json`,
 `active_model`, `compaction.json`, `timeouts.json`, `model_limits.json`,
-`model_options.json`, and the optional `build-catalog.json` metadata cache.
+`model_options.json`, `model-validation.json`, and the optional `build-catalog.json` metadata cache.
 See [security policy](SECURITY.md) before changing access controls or exposing
 any endpoint beyond loopback.

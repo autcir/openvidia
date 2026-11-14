@@ -4,7 +4,7 @@ let activeModel = ''
 let allModels = []
 let presets = []
 let _logEntries = 0
-let modelFilter = 'recent'
+let modelFilter = 'tested'
 let keyFilter = 'active'
 let _lastKeyStats = null
 
@@ -36,6 +36,13 @@ function readToken() {
 let controlToken = readToken()
 
 /* ── API helper ──────────────────────────────── */
+function serverMessage(data, fallback) {
+  const value = data?.detail || data?.error
+  if (typeof value === 'string') return value.slice(0, 240)
+  if (value && typeof value.message === 'string') return value.message.slice(0, 240)
+  return fallback
+}
+
 async function api(method, path, body) {
   const opts = { method, headers: {} }
   if (controlToken) opts.headers[TOKEN_HEADER] = controlToken
@@ -44,9 +51,10 @@ async function api(method, path, body) {
   if (r.status === 401) {
     throw new Error('This dashboard has no control token. Reopen it from the OpenVidia app, or append ?token=<contents of ~/.config/openvidia/control_token>')
   }
-  if (!r.ok) { let t; try { t = await r.text() } catch { t = r.statusText }; throw new Error(t) }
-  const data = await r.json()
-  if (data && data.ok === false) throw new Error(data.error || 'Request rejected')
+  let data
+  try { data = await r.json() } catch (_) { throw new Error(`HTTP ${r.status}: server returned an invalid response. Try again or check the service.`) }
+  if (!r.ok) throw new Error(serverMessage(data, `HTTP ${r.status}: request failed`))
+  if (data && data.ok === false) throw new Error(serverMessage(data, 'Request rejected'))
   return data
 }
 
@@ -91,16 +99,16 @@ function renderUpstream(up) {
   badge.className = `header-stat upstream-badge up-${st}`
   if (st === 'ok') {
     txt.textContent = ms != null ? `${Math.round(ms)}ms` : 'ok'
-    badge.title = 'NVIDIA reachable'
+    badge.title = 'NVIDIA model metadata is reachable; inference availability must be checked separately'
   } else if (st === 'slow') {
     txt.textContent = ms != null ? `slow ${Math.round(ms)}ms` : 'slow'
-    badge.title = `NVIDIA is slow (${(up && up.detail) || 'high latency'}) — not your keys`
+    badge.title = `NVIDIA metadata is slow (${(up && up.detail) || 'high latency'}); this does not establish inference or key health`
   } else if (st === 'down') {
     txt.textContent = 'down'
-    badge.title = `NVIDIA is DOWN (${(up && up.detail) || 'no response'}) — your proxy and keys are fine`
+    badge.title = `NVIDIA metadata is unreachable (${(up && up.detail) || 'no response'}); inference availability may differ`
   } else {
     txt.textContent = '…'
-    badge.title = 'NVIDIA health not measured yet'
+    badge.title = 'NVIDIA metadata reachability has not been measured yet'
   }
 }
 
@@ -283,20 +291,37 @@ async function setFallback(mode) {
 }
 
 /* ── Models browser ──────────────────────────── */
-const FILTERS = ['recent', 'starred', 'all', 'verified']
+const FILTERS = ['tested', 'recent', 'starred', 'all']
+
+function validationState(model) {
+  const evidence = model.validation
+  if (!evidence || typeof evidence !== 'object') return { eligible: false, kind: '', label: 'Tools not tested', detail: 'Use Check tools for streaming and a tool-result round trip.' }
+  const tested = Date.parse(evidence.tested_at)
+  const expires = Date.parse(evidence.expires_at)
+  const now = Date.now()
+  const fresh = Number.isFinite(tested) && Number.isFinite(expires) && tested <= now && expires > now && expires > tested
+  const checksPassed = evidence.stream === true && evidence.tool_call === true && evidence.tool_result === true
+  const unhealthy = model.health?.circuit_open || model.health?.consecutive_failures > 0
+  const recorded = Number.isFinite(tested) ? `Checked ${new Date(tested).toLocaleString()}` : 'Check time unavailable'
+  const reason = typeof evidence.reason === 'string' ? evidence.reason.replaceAll('_', ' ') : ''
+  if (evidence.status === 'failed') return { eligible: false, kind: 'failed', label: 'Latest tool check failed', detail: `${recorded}${reason ? ' — ' + reason : ''}. Run Check tools again.` }
+  if (evidence.status !== 'passed' || !checksPassed) return { eligible: false, kind: 'warn', label: 'Tool check incomplete', detail: `${recorded}. Streaming, tool call and tool result must all pass.` }
+  if (!fresh) return { eligible: false, kind: 'warn', label: 'Tool check expired', detail: `${recorded}. Run Check tools to refresh the evidence.` }
+  if (unhealthy) return { eligible: false, kind: 'failed', label: 'Currently failing', detail: `${recorded}; recent traffic reports failures. Run Check tools before relying on this model.` }
+  return { eligible: true, kind: 'passed', label: 'Tools passed', detail: `${recorded}; valid until ${new Date(expires).toLocaleString()}. Streaming, tool call and tool result passed; this is not a coding-quality benchmark.`, opencode: evidence.opencode === true }
+}
 function getFilteredModels() {
   let list
-  if (modelFilter === 'recent') {
+  if (modelFilter === 'tested') {
+    list = allModels.filter(m => m.id !== 'openvidia' && validationState(m).eligible)
+      .sort((a, b) => Date.parse(b.validation.tested_at) - Date.parse(a.validation.tested_at) || a.id.localeCompare(b.id))
+  } else if (modelFilter === 'recent') {
     // Official update dates measure recency, never relative model strength.
     list = allModels.filter(m => m.id !== 'openvidia' && m.catalog?.endpoint_kind === 'free_chat' && Number.isFinite(Date.parse(m.catalog.updated_at)))
       .sort((a, b) => Date.parse(b.catalog.updated_at) - Date.parse(a.catalog.updated_at) || a.id.localeCompare(b.id))
   } else if (modelFilter === 'starred') {
     // in the order they were starred
     list = presets.map(id => allModels.find(m => m.id === id) || { id, owned_by: '', unavailable: catalogLoaded })
-  } else if (modelFilter === 'verified') {
-    // Observed success is evidence of availability, not a promise of tool support.
-    list = allModels.filter(m => m.id !== 'openvidia' && m.health?.success > 0 && !m.health.circuit_open && m.health.failure_rate < 0.5)
-      .sort((a, b) => (a.health.failure_rate - b.health.failure_rate) || (a.health.median_ttft - b.health.median_ttft))
   } else {
     list = [...allModels]
   }
@@ -315,11 +340,11 @@ function renderFilters() {
   FILTERS.forEach(f => {
     const b = document.createElement('button')
     b.className = `browser-filter ${f === modelFilter ? 'active' : ''}`
-    if (f === 'recent') { b.textContent = 'Recent'; b.title = 'Recent free chat API models from NVIDIA Build, ordered by official update date; recency is not a quality ranking' }
-    else if (f === 'starred') b.innerHTML = `★ Starred <span class="filter-count">${presets.length}</span>`
-    else if (f === 'verified') { b.textContent = 'Answered'; b.title = 'Models with successful traffic through this proxy; capabilities still depend on the model' }
+    if (f === 'tested') { b.textContent = 'Tested tools'; b.title = 'Fresh successful streaming, tool-call and tool-result checks; not a model-strength ranking' }
+    else if (f === 'recent') { b.textContent = 'Recent'; b.title = 'Recent free chat API models from NVIDIA Build, ordered by official update date; recency is not a quality ranking' }
+    else if (f === 'starred') b.innerHTML = `★ Favorites <span class="filter-count">${presets.length}</span>`
     else b.textContent = 'All'
-    b.onclick = () => { modelFilter = f; renderFilters(); renderModelList() }
+    b.onclick = () => { modelFilter = f; renderFilters(); renderModelList(); renderCatalogStatus() }
     c.appendChild(b)
   })
 }
@@ -335,7 +360,9 @@ function renderCatalogStatus() {
     : `${freshness}${absent ? ' — choose another active model; it is no longer listed.' : ''}`
   const count = allModels.filter(m => m.id !== 'openvidia' && m.catalog?.endpoint_kind === 'free_chat' && Number.isFinite(Date.parse(m.catalog.updated_at))).length
   const officialTime = Date.parse(catalogMetadata.refreshed_at)
-  $('catalogInfo').textContent = count
+  $('catalogInfo').textContent = modelFilter === 'tested'
+    ? `${allModels.filter(m => m.id !== 'openvidia' && validationState(m).eligible).length} models have fresh tool checks. OpenCode has a separate client-test badge. Use Check tools in Recent or All. No quality ranking.`
+    : count
     ? `Recent: ${count} free chat API models from NVIDIA Build’s latest page. Ordered by update date, not benchmark strength.${Number.isFinite(officialTime) ? ' Metadata checked ' + new Date(officialTime).toLocaleString() + '.' : ''}${catalogMetadata.stale ? ' Metadata is stale; showing the last successful refresh.' : ''} All contains the full API catalog.`
     : 'Recent metadata is unavailable. Open All for the complete API catalog; previews without API access are not selectable.'
   $('catalogInfo').className = `catalog-status${catalogMetadata.stale || !count ? ' warn' : ''}`
@@ -379,22 +406,43 @@ async function testModel(id, btn) {
   btn.parentElement.parentElement.after(r)
   try {
     const res = await api('POST', '/api/test-model', { model: id })
-    if (res.ok) { r.className = 'test-result ok'; r.textContent = `✓ ${(res.response || '').slice(0, 80)}`; btn.className = 'browser-test done'; btn.textContent = '✓' }
-    else { r.className = 'test-result fail'; r.textContent = `✗ ${res.detail || res.error || 'unknown'}`.slice(0, 120); btn.className = 'browser-test fail'; btn.textContent = '✗' }
+    if (res.ok) { r.className = 'test-result ok'; r.textContent = `✓ ${String(res.response || '').slice(0, 80)}`; btn.className = 'browser-test done'; btn.textContent = '✓' }
+    else { r.className = 'test-result fail'; r.textContent = `✗ ${serverMessage(res, 'Availability check failed')}`.slice(0, 120); btn.className = 'browser-test fail'; btn.textContent = '✗' }
   } catch (e) { r.className = 'test-result fail'; r.textContent = `✗ ${e.message.slice(0, 80)}`; btn.className = 'browser-test fail'; btn.textContent = '✗' }
   setTimeout(() => r.remove(), 8000)
   setTimeout(() => { btn.className = 'browser-test'; btn.textContent = '▶' }, 5000)
+}
+
+async function validateModel(id, button) {
+  button.disabled = true
+  button.textContent = 'Checking…'
+  try {
+    const result = await api('POST', '/api/validate-model', { model: id })
+    if (!result.validation || typeof result.validation !== 'object') throw new Error('Server did not return tool-check evidence')
+    const model = allModels.find(m => m.id === id)
+    if (model && result.validation) model.validation = result.validation
+    const state = validationState(model || { validation: result.validation })
+    toast(state.eligible ? `Tools passed: ${id}` : `${state.label}: ${id}`, state.eligible ? 'ok' : 'warn')
+    renderModelList(); renderCatalogStatus()
+  } catch (e) { toast(`Tool check failed: ${e.message}`, 'error') }
+  finally {
+    button.disabled = false
+    button.textContent = 'Check tools'
+    await fetchModels()
+  }
 }
 
 function renderModelList() {
   const f = getFilteredModels()
   $('modelCount').textContent = `${f.length} / ${allModels.length}`
   if (!f.length) {
-    const hint = modelFilter === 'recent'
+    const hint = modelFilter === 'tested'
+      ? 'No fresh passing tool checks. Open Recent or All and click Check tools. An availability response alone does not qualify.'
+      : modelFilter === 'recent'
       ? 'No recent API models with official metadata. Open All to browse the complete catalog.'
       : modelFilter === 'starred'
       ? 'No starred models — tap ☆ on any model in All'
-      : modelFilter === 'verified' ? 'No observed responses yet — send a request through the proxy. Answered means observed success, not a capability guarantee.' : 'No models found'
+      : 'No models found'
     $('modelList').innerHTML = `<div class="browser-empty">${hint}</div>`
     return
   }
@@ -426,6 +474,19 @@ function renderModelList() {
       tags.title = m.catalog.use_cases.join(' · ')
       info.appendChild(tags)
     }
+    const evidence = validationState(m)
+    const result = document.createElement('span'); result.className = `validation-badge ${evidence.kind}`
+    const checkedAt = Date.parse(m.validation?.tested_at)
+    const expiresAt = Date.parse(m.validation?.expires_at)
+    result.textContent = evidence.label + (Number.isFinite(checkedAt) ? ` · checked ${new Date(checkedAt).toLocaleTimeString()}` : '')
+    if (evidence.eligible && Number.isFinite(expiresAt)) result.textContent += ` · expires ${new Date(expiresAt).toLocaleTimeString()}`
+    result.title = evidence.detail
+    info.appendChild(result)
+    if (evidence.opencode) {
+      const client = document.createElement('span'); client.className = 'validation-badge passed'
+      client.textContent = 'OpenCode client passed'; client.title = evidence.detail
+      info.appendChild(client)
+    }
     item.appendChild(info)
     if (m.unavailable) {
       const badge = document.createElement('span'); badge.className = 'health-badge health-bad'; badge.textContent = 'not listed'; item.appendChild(badge)
@@ -437,7 +498,7 @@ function renderModelList() {
       const h = m.health
       let cls = '', label = ''
       if (h.circuit_open) { cls = 'health-bad'; label = 'down' }
-      else if (h.failure_rate >= 0.5 && h.requests >= 4) { cls = 'health-bad'; label = 'failing' }
+      else if (h.consecutive_failures > 0) { cls = 'health-bad'; label = 'failing' }
       else if (h.median_ttft > 5 && h.requests >= 4) { cls = 'health-slow'; label = `slow ${Math.round(h.median_ttft)}s` }
       if (cls) {
         const hb = document.createElement('span')
@@ -451,10 +512,15 @@ function renderModelList() {
       item.appendChild(ow)
     }
     const acts = document.createElement('div'); acts.className = 'browser-acts'
-    const test = document.createElement('button'); test.className = 'browser-test'; test.textContent = '▶'; test.title = 'Test'
+    const test = document.createElement('button'); test.className = 'browser-test'; test.textContent = '▶'; test.title = 'Check availability only — this does not certify tools or OpenCode compatibility'
     test.disabled = Boolean(m.unavailable)
     test.onclick = e => { e.stopPropagation(); testModel(m.id, test) }
     acts.appendChild(test)
+    const validate = document.createElement('button'); validate.className = 'browser-validate'; validate.textContent = 'Check tools'
+    validate.title = 'Run streaming, tool-call and tool-result checks; this uses provider quota and does not benchmark coding quality'
+    validate.disabled = Boolean(m.unavailable)
+    validate.onclick = e => { e.stopPropagation(); validateModel(m.id, validate) }
+    acts.appendChild(validate)
     const starred = presets.includes(m.id)
     const star = document.createElement('button')
     star.className = `browser-star ${starred ? 'on' : ''}`
@@ -599,11 +665,13 @@ $('newKeyInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('co
 /* ── Log ────────────────────────────────────── */
 $('clearLogBtn').addEventListener('click', () => { $('logArea').innerHTML = '<div class="log-empty">Cleared</div>'; _logEntries = 0; $('logCount').textContent = '0' })
 
-function appendLog(level, msg) {
-  const t = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+function appendLog(level, msg, timestamp) {
+  const occurred = typeof timestamp === 'number' && Number.isFinite(timestamp) ? new Date(timestamp * 1000) : null
+  const knownTime = occurred && Number.isFinite(occurred.getTime())
+  const t = knownTime ? occurred.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'unknown'
   const el = document.createElement('div')
   el.className = `log-entry ${level}`
-  const time = document.createElement('span'); time.className = 'log-time'; time.textContent = t
+  const time = document.createElement('span'); time.className = 'log-time'; time.textContent = t; time.title = knownTime ? occurred.toISOString() : 'Event timestamp unavailable'
   const text = document.createElement('span'); text.className = 'log-msg'; text.textContent = msg
   el.appendChild(time); el.appendChild(text)
   const e = $('logArea').querySelector('.log-empty')
@@ -620,12 +688,13 @@ function appendLog(level, msg) {
 // accepts ?token= as well as the header.
 new EventSource(`/api/logs/stream?token=${encodeURIComponent(controlToken)}`).onmessage = e => {
   try {
-    const { msg } = JSON.parse(e.data)
+    const { msg, timestamp } = JSON.parse(e.data)
+    if (typeof msg !== 'string') return
     let level = 'info'
     if (/cooldown|429|rate.limit|⏳/.test(msg)) level = 'cooldown'
     else if (/error|Error|✗|failed/.test(msg)) level = 'error'
     else if (/OK|✔|✓|revived/.test(msg)) level = 'ok'
-    appendLog(level, msg)
+    appendLog(level, msg, timestamp)
   } catch (_) {}
 }
 

@@ -19,8 +19,8 @@
           <span class="logo-text">OpenVidia</span>
         </div>
         <div class="header-right">
-          <span class="header-stat upstream-badge" id="hUpstream" title="NVIDIA upstream health — probed every 30s">
-            <span class="up-dot" id="upDot"></span> NVIDIA <span id="upText">…</span>
+          <span class="header-stat upstream-badge" id="hUpstream" title="NVIDIA metadata reachability — not an inference test; checked every 30s">
+            <span class="up-dot" id="upDot"></span> NVIDIA metadata <span id="upText">…</span>
           </span>
           <span class="header-stat" id="hKeyCount">0 keys</span>
           <span class="header-stat" id="hRpm">0 RPM</span>
@@ -76,7 +76,7 @@
         </div>
 
         <!-- ── MODELS (single list; ★ Starred = quick-pick shortlist) ── -->
-        <div class="bento-cell cell-models col-span-2" data-dropdown>
+        <div class="bento-cell cell-models col-span-2 open" data-dropdown>
           <div class="bento-hd" data-toggle data-idx="01">
             <span class="bento-ttl">Models</span>
             <span class="bento-badge" id="modelCount">0</span>
@@ -84,9 +84,10 @@
           </div>
           <div class="bento-body" data-body>
             <div class="bento-body-inner">
+              <p class="model-guidance">Choose a model here, then select <code>openvidia/openvidia</code> in OpenCode. Check tools verifies streaming and tool results. ▶ checks availability only; neither is a coding-quality benchmark.</p>
               <button class="btn btn-xs" id="refreshModelsBtn" type="button">Refresh catalog</button>
               <div class="catalog-status" id="catalogStatus" role="status" aria-live="polite">Catalog not loaded</div>
-              <div class="catalog-status" id="catalogInfo">Recent models use official NVIDIA Build metadata.</div>
+              <div class="catalog-status" id="catalogInfo">Tested tools requires fresh streaming and tool-result checks.</div>
               <div class="browser-filters" id="modelFilters"></div>
               <input type="text" class="browser-input" id="modelSearch" placeholder="Search models…" spellcheck="false" />
               <div class="browser-list" id="modelList"><div class="browser-empty">Loading…</div></div>

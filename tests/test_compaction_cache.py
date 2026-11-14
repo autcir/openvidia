@@ -440,3 +440,166 @@ class TestRetiredSummaryModel:
 
     def test_default_pins_no_model(self):
         assert compaction._DEFAULTS["summary_model"] == ""
+
+
+class TestDetachedSummaryFailures:
+    @pytest.mark.asyncio
+    async def test_late_failure_is_logged_once_without_loop_exception(self, state, monkeypatch):
+        monkeypatch.setattr(
+            compaction,
+            "_settings",
+            lambda: {**compaction._DEFAULTS, "inline_deadline": 0.01},
+        )
+        release = asyncio.Event()
+        logs = []
+        loop_errors = []
+        loop = asyncio.get_running_loop()
+        old_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda loop, context: loop_errors.append(context))
+
+        async def fail_later(*args, **kwargs):
+            await release.wait()
+            raise RuntimeError("ReadTimeout")
+
+        monkeypatch.setattr(compaction, "_summarize", fail_later)
+        big = SYS + [{"role": "user", "content": "x" * 4_000} for _ in range(120)]
+        try:
+            result = await maybe_compact(big, state=state, client=None, log=logs.append)
+            assert estimate_tokens(result) < estimate_tokens(big)
+            task = next(iter(compaction._inflight.values()))[0]
+            assert not task.done()
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+            await asyncio.sleep(0)
+            assert len([entry for entry in logs if "summarize failed" in entry]) == 1
+            assert not compaction._inflight
+            assert loop_errors == []
+        finally:
+            loop.set_exception_handler(old_handler)
+
+    @pytest.mark.asyncio
+    async def test_cancelled_request_preserves_summary_without_shield_exception(
+        self, state, monkeypatch
+    ):
+        monkeypatch.setattr(
+            compaction,
+            "_settings",
+            lambda: {**compaction._DEFAULTS, "inline_deadline": 60.0},
+        )
+        started = asyncio.Event()
+        release = asyncio.Event()
+        logs = []
+        loop_errors = []
+        loop = asyncio.get_running_loop()
+        old_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda loop, context: loop_errors.append(context))
+
+        async def fail_later(*args, **kwargs):
+            started.set()
+            await release.wait()
+            raise RuntimeError("late upstream error")
+
+        monkeypatch.setattr(compaction, "_summarize", fail_later)
+        big = SYS + [{"role": "user", "content": "x" * 4_000} for _ in range(120)]
+        try:
+            request = asyncio.create_task(
+                maybe_compact(big, state=state, client=None, log=logs.append)
+            )
+            await started.wait()
+            summary = next(iter(compaction._inflight.values()))[0]
+            request.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await request
+            assert not summary.done()
+            release.set()
+            await asyncio.gather(summary, return_exceptions=True)
+            await asyncio.sleep(0)
+            assert len([entry for entry in logs if "summarize failed" in entry]) == 1
+            assert loop_errors == []
+        finally:
+            loop.set_exception_handler(old_handler)
+
+
+class TestSummaryJobLifecycle:
+    @pytest.mark.asyncio
+    async def test_job_deadline_includes_wait_for_upstream_capacity(self, state, monkeypatch):
+        import httpx
+
+        monkeypatch.setattr(
+            compaction,
+            "_settings",
+            lambda: {
+                **compaction._DEFAULTS,
+                "inline_deadline": 0.005,
+                "summary_job_timeout": 0.03,
+            },
+        )
+        semaphore = asyncio.Semaphore(0)
+        monkeypatch.setattr(compaction, "get_upstream_sem", lambda: semaphore)
+        sent = []
+
+        def upstream(request):
+            sent.append(request)
+            return httpx.Response(200, json={"choices": [{"message": {"content": "summary"}}]})
+
+        logs = []
+        big = SYS + [{"role": "user", "content": "x" * 4_000} for _ in range(120)]
+        async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
+            started = asyncio.get_running_loop().time()
+            result = await maybe_compact(big, state=state, client=client, log=logs.append)
+            assert asyncio.get_running_loop().time() - started < 0.5
+            assert estimate_tokens(result) < estimate_tokens(big)
+            task = next(iter(compaction._inflight.values()))[0]
+            errors = await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=1)
+            assert isinstance(errors[0], TimeoutError)
+            assert "total job deadline" in str(errors[0])
+            assert not sent
+            assert not compaction._inflight
+            assert not compaction._summary_clients
+            assert any("summarize failed (TimeoutError:" in entry for entry in logs)
+
+    @pytest.mark.asyncio
+    async def test_shutdown_cancels_only_jobs_owned_by_its_client(self, monkeypatch):
+        started = []
+        stopped = []
+
+        async def pending(client, *args, **kwargs):
+            started.append(client)
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopped.append(client)
+
+        monkeypatch.setattr(compaction, "_summarize", pending)
+        owner_a, owner_b = object(), object()
+
+        def job(key, owner):
+            return compaction._start_summarize(
+                key,
+                1,
+                "fingerprint",
+                client=owner,
+                keys=["key"],
+                model="vendor/model",
+                base=None,
+                new_msgs=_msgs(1),
+                cfg=compaction._DEFAULTS,
+                log=lambda entry: None,
+            )
+
+        task_a = job("a", owner_a)
+        task_b = job("b", owner_b)
+        await asyncio.sleep(0)
+        try:
+            assert started == [owner_a, owner_b]
+            await compaction.cancel_pending_summaries(owner_a)
+            assert task_a.cancelled()
+            assert stopped == [owner_a]
+            assert not task_b.done()
+            assert "a" not in compaction._inflight
+            assert compaction._inflight["b"][0] is task_b
+        finally:
+            await compaction.cancel_pending_summaries()
+        assert task_b.cancelled()
+        assert not compaction._inflight
+        assert not compaction._summary_clients

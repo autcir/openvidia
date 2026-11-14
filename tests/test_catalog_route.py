@@ -15,7 +15,10 @@ async def test_model_route_preserves_ids_and_enriches_both_client_formats(monkey
             lambda _: httpx.Response(
                 200,
                 json={
-                    "data": [{"id": "vendor/current"}, {"id": "vendor/legacy"}],
+                    "data": [
+                        {"id": "vendor/current"},
+                        {"id": "vendor/legacy", "validation": {"status": "passed"}},
+                    ],
                     "models": [{"id": "obsolete/compatibility-copy"}],
                 },
             )
@@ -42,6 +45,7 @@ async def test_model_route_preserves_ids_and_enriches_both_client_formats(monkey
         assert [row["id"] for row in body["data"]] == expected
         assert [row["id"] for row in body["models"]] == expected
         assert body["models"][1]["catalog"] == body["data"][1]["catalog"]
+        assert "validation" not in body["data"][2]
         assert body["catalog"] == {"stale": False, "matched_models": 1}
     finally:
         await upstream.aclose()

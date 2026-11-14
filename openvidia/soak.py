@@ -27,6 +27,8 @@ class ProbeError(Exception):
     REASONS = frozenset(
         {
             "health_identity",
+            "invalid_response",
+            "provider_fallback",
             "stream_error",
             "stream_contract",
             "tool_call_count",
@@ -74,6 +76,38 @@ def _save(path: Path, data: dict) -> None:
     temporary.replace(path)
 
 
+def _response_object(response: httpx.Response) -> dict:
+    try:
+        value = response.json()
+    except ValueError as error:
+        raise ProbeError("invalid_response") from error
+    if not isinstance(value, dict):
+        raise ProbeError("invalid_response")
+    return value
+
+
+def _require_direct_model(response: httpx.Response) -> None:
+    # A successful fallback proves the fallback works, not the requested
+    # model. Never persist the provider name or raw response as a reason.
+    if "x-openvidia-provider" in response.headers:
+        raise ProbeError("provider_fallback")
+
+
+def _response_message(response: httpx.Response) -> dict:
+    _require_direct_model(response)
+    data = _response_object(response)
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise ProbeError("invalid_response")
+    message = choices[0].get("message")
+    if not isinstance(message, dict):
+        raise ProbeError("invalid_response")
+    content = message.get("content")
+    if content is not None and not isinstance(content, str):
+        raise ProbeError("invalid_response")
+    return message
+
+
 async def probe(client: httpx.AsyncClient, model: str, timeout: float) -> dict:
     """Check liveness, SSE termination and an actual tool-result round trip."""
     results = {"health": False, "stream": False, "tool_call": False, "tool_result": False}
@@ -81,9 +115,10 @@ async def probe(client: httpx.AsyncClient, model: str, timeout: float) -> dict:
         async with asyncio.timeout(timeout):
             response = await client.get("/health")
             response.raise_for_status()
-            if response.json().get("service") != "openvidia":
+            if _response_object(response).get("service") != "openvidia":
                 raise ProbeError("health_identity")
             results["health"] = True
+            probe_headers = {"X-OpenVidia-Strict-Model": "1"}
             common = {
                 "model": model,
                 "max_tokens": 128,
@@ -92,6 +127,7 @@ async def probe(client: httpx.AsyncClient, model: str, timeout: float) -> dict:
             async with client.stream(
                 "POST",
                 "/v1/chat/completions",
+                headers=probe_headers,
                 json={
                     **common,
                     "stream": True,
@@ -99,6 +135,7 @@ async def probe(client: httpx.AsyncClient, model: str, timeout: float) -> dict:
                 },
             ) as response:
                 response.raise_for_status()
+                _require_direct_model(response)
                 content = []
                 done = False
                 async for line in response.aiter_lines():
@@ -106,11 +143,27 @@ async def probe(client: httpx.AsyncClient, model: str, timeout: float) -> dict:
                         done = True
                         break
                     if line.startswith("data: "):
-                        event = json.loads(line[6:])
+                        try:
+                            event = json.loads(line[6:])
+                        except ValueError as error:
+                            raise ProbeError("invalid_response") from error
+                        if not isinstance(event, dict):
+                            raise ProbeError("invalid_response")
                         if "error" in event:
                             raise ProbeError("stream_error")
-                        for choice in event.get("choices", []):
-                            content.append(choice.get("delta", {}).get("content") or "")
+                        choices = event.get("choices", [])
+                        if not isinstance(choices, list):
+                            raise ProbeError("invalid_response")
+                        for choice in choices:
+                            if not isinstance(choice, dict):
+                                raise ProbeError("invalid_response")
+                            delta = choice.get("delta")
+                            if not isinstance(delta, dict):
+                                raise ProbeError("invalid_response")
+                            text = delta.get("content")
+                            if text is not None and not isinstance(text, str):
+                                raise ProbeError("invalid_response")
+                            content.append(text or "")
                 if not done or "".join(content).strip() != "SOAK_OK":
                     raise ProbeError("stream_contract")
             results["stream"] = True
@@ -137,10 +190,11 @@ async def probe(client: httpx.AsyncClient, model: str, timeout: float) -> dict:
             ]
             response = await client.post(
                 "/v1/chat/completions",
+                headers=probe_headers,
                 json={**common, "messages": messages, "tools": tools, "tool_choice": "required"},
             )
             response.raise_for_status()
-            message = response.json()["choices"][0]["message"]
+            message = _response_message(response)
             calls = message.get("tool_calls", [])
             if not isinstance(calls, list) or not 1 <= len(calls) <= 16:
                 raise ProbeError("tool_call_count")
@@ -179,12 +233,11 @@ async def probe(client: httpx.AsyncClient, model: str, timeout: float) -> dict:
             )
             response = await client.post(
                 "/v1/chat/completions",
+                headers=probe_headers,
                 json={**common, "messages": messages, "tools": tools, "tool_choice": "none"},
             )
             response.raise_for_status()
-            if (
-                response.json()["choices"][0]["message"].get("content") or ""
-            ).strip() != "SOAK_TOOL_OK":
+            if (_response_message(response).get("content") or "").strip() != "SOAK_TOOL_OK":
                 raise ProbeError("tool_result_contract")
             results["tool_result"] = True
     except (

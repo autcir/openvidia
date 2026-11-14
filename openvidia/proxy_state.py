@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import re
 import threading
 import time
 from collections import deque
@@ -377,6 +378,9 @@ class ProxyState:
         self.port = port
         self.lock = asyncio.Lock()
         self.log_buffer: deque = deque(maxlen=500)
+        self.log_events: deque[dict] = deque(maxlen=500)
+        self._log_sequence = 0
+        self._logs_lock = threading.Lock()
         self._log_cb = log_cb
 
         self.active_model: str | None = None
@@ -475,11 +479,40 @@ class ProxyState:
     # ── Logging / SSE push ──────────────────────────────────────────
 
     def log_cb(self, msg: str) -> None:
+        # Keep credentials out of stdout, the compatibility buffer and SSE.
+        msg = re.sub(r"\b(?:nvapi-|sk-)[A-Za-z0-9_-]+", "[REDACTED]", msg)
+        msg = re.sub(r"(?i)\bBearer\s+[^\s\"']+", "Bearer [REDACTED]", msg)
+        msg = re.sub(r"([?&]token=)[^\s&]+", r"\1[REDACTED]", msg)
+        timestamp = time.time()
         self._log_cb(msg)
-        self.log_buffer.append(msg)
+        with self._logs_lock:
+            self._log_sequence += 1
+            event = {"id": self._log_sequence, "msg": msg, "timestamp": timestamp}
+            self.log_buffer.append(msg)
+            self.log_events.append(event)
+            listeners = list(self.listeners)
         if self.loop and self.loop.is_running():
-            for q in list(self.listeners):
-                self.loop.call_soon_threadsafe(q.put_nowait, msg)
+            for queue in listeners:
+                self.loop.call_soon_threadsafe(self._enqueue_log, queue, dict(event))
+
+    @staticmethod
+    def _enqueue_log(queue: asyncio.Queue, event: dict) -> None:
+        if queue.full():
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        queue.put_nowait(event)
+
+    def subscribe_logs(self, queue: asyncio.Queue) -> list[dict]:
+        """Subscribe before taking an atomic replay snapshot; IDs dedupe overlap."""
+        with self._logs_lock:
+            self.listeners.add(queue)
+            return [dict(event) for event in self.log_events]
+
+    def unsubscribe_logs(self, queue: asyncio.Queue) -> None:
+        with self._logs_lock:
+            self.listeners.discard(queue)
 
     # ── Cooldown API ─────────────────────────────────────────────────
 

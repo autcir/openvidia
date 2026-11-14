@@ -40,6 +40,19 @@ successful check also does not establish unattended availability or performance
 on long, real repository tasks. Test those separately with OpenCode sessions and
 the duration-controlled `python -m openvidia.soak` monitor.
 
+## Dashboard checks and filtering
+
+**Models → Tested tools** uses local checks expiring after six hours. Choose
+**Recent** or **All**, then **Check tools** for a 60-second maximum cycle through
+the configured local inference path. The authenticated route is
+`POST /api/validate-model` with an explicit `provider/model` ID. Only one such
+check runs at a time. Failed checks replace old successes; results persist in
+`model-validation.json`. This action does not run OpenCode or grant its badge.
+The separate availability button has a 45-second deadline and only verifies a
+nonempty text completion. Neither metadata reachability nor availability alone
+qualifies a model for Tested tools. The standalone CLI reports remain separate
+from this local dashboard evidence.
+
 ## OpenCode integration checks
 
 Protocol probes and actual OpenCode execution are different checks. For a
@@ -66,3 +79,5 @@ from corrected harness runs and redact logs before sharing results.
 
 See [the dated results](validation-results/2026-11-13.md) for the protocol and
 OpenCode checks performed on 13 November 2026, including failed protocol stages.
+
+See also [14 November results](validation-results/2026-11-14.md) for the follow-up dashboard and OpenCode alias checks.

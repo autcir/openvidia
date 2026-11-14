@@ -425,7 +425,8 @@ Optional — create `~/.config/openvidia/compaction.json` (built-in defaults sho
   "summary_model": "",
   "summary_max_tokens": 1024,
   "inline_deadline": 6.0,
-  "summarize_timeout": 45.0
+  "summarize_timeout": 45.0,
+  "summary_job_timeout": 90.0
 }
 ```
 
@@ -440,7 +441,8 @@ Optional — create `~/.config/openvidia/compaction.json` (built-in defaults sho
 | `summary_model` | Model used to summarize. Point it at a **fast** model: it runs on a different traffic stream than the one your agent is saturating. Empty = the default model |
 | `summary_max_tokens` | Cap on the generated summary length |
 | `inline_deadline` | Seconds the *client request* will wait for a summary before being served from the fallback ladder |
-| `summarize_timeout` | Upstream cap for the summarize call itself, which continues in the background past the deadline |
+| `summarize_timeout` | Per-attempt upstream timeout; the job may continue in the background after the inline deadline |
+| `summary_job_timeout` | Total background job deadline, including queueing and retries; defaults to 90 seconds |
 
 ---
 
@@ -828,9 +830,24 @@ availability and the selected model remain external dependencies; adding keys
 cannot guarantee unlimited throughput or continuous free service.
 
 
-### Recent models in the desktop picker
+### Finding a usable model in the desktop picker
 
-The default **Recent** view matches the latest NVIDIA Build page against IDs
+The default **Tested tools** view shows models with successful local streaming,
+forced tool-call and tool-result checks from the last six hours. Models with a
+current circuit or consecutive failures are excluded. Open **Models**, switch to
+**Recent** or **All** if needed, and use **Check tools** to validate a candidate.
+A failed new check replaces the previous success. The separate availability
+button only checks a text response; it does not certify tools. The **OpenCode**
+badge requires a real client run, not just a protocol probe. Evidence is stored
+locally in `model-validation.json`; a fresh installation starts without evidence.
+
+Select a tested model, then select `openvidia/openvidia` in OpenCode's model
+picker (`/model`). OpenVidia's active model controls that compatibility alias.
+A passed check is a point-in-time result, not a quality ranking or an uptime
+promise. NVIDIA can still return 503/504 or stall later. The startup key check
+only tests metadata reachability; it does not prove inference availability.
+
+The **Recent** view matches the latest NVIDIA Build page against IDs
 actually returned by the inference API, then sorts by the official catalog
 modification date. It shows official display names and use-case tags while
 keeping the exact API ID searchable. This is recency metadata, not a benchmark

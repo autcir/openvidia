@@ -254,3 +254,126 @@ def test_probe_error_never_keeps_unknown_provider_text():
     error = soak.ProbeError("secret-provider-content")
     assert error.reason == "probe_contract"
     assert "secret" not in str(error)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stage,malformed",
+    [
+        ("health", []),
+        ("stream", []),
+        ("stream", {"choices": "bad"}),
+        ("stream", {"choices": ["bad"]}),
+        ("stream", {"choices": [{"delta": "bad"}]}),
+        ("stream", {"choices": [{"delta": {"content": ["bad"]}}]}),
+        ("tool_call", []),
+        ("tool_call", {"choices": {}}),
+        ("tool_call", {"choices": ["bad"]}),
+        ("tool_call", {"choices": [{"message": "bad"}]}),
+        ("tool_result", {"choices": [{"message": {"content": ["bad"]}}]}),
+    ],
+)
+async def test_malformed_response_shapes_fail_safely_instead_of_raising(stage, malformed):
+    original = _handler()
+
+    def handler(request):
+        payload = {} if request.url.path == "/health" else json.loads(request.content)
+        current = (
+            "health"
+            if request.url.path == "/health"
+            else "stream"
+            if payload.get("stream")
+            else "tool_call"
+            if payload.get("tool_choice") == "required"
+            else "tool_result"
+        )
+        if current != stage:
+            return original(request)
+        if current == "stream":
+            return httpx.Response(
+                200,
+                text=f"data: {json.dumps(malformed)}\n\ndata: [DONE]\n\n",
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx.Response(200, json=malformed)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://localhost:1919"
+    ) as client:
+        result = await soak.probe(client, "test/model", 2)
+    assert result["ok"] is False
+    assert result["reason"] == "invalid_response"
+    assert result["stages"][stage] is False
+    assert set(result) == {"ok", "stages", "error_type", "reason"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["stream", "tool_call", "tool_result"])
+async def test_provider_fallback_cannot_certify_requested_model(stage):
+    original = _handler()
+
+    def handler(request):
+        response = original(request)
+        if request.url.path != "/health":
+            payload = json.loads(request.content)
+            current = (
+                "stream"
+                if payload.get("stream")
+                else "tool_call"
+                if payload.get("tool_choice") == "required"
+                else "tool_result"
+            )
+            if current == stage:
+                response.headers["X-OpenVidia-Provider"] = "secret-provider-name"
+        return response
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://localhost:1919"
+    ) as client:
+        result = await soak.probe(client, "test/model", 2)
+    assert result["ok"] is False
+    assert result["reason"] == "provider_fallback"
+    assert result["stages"][stage] is False
+    assert "secret" not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+async def test_protocol_probe_disables_proxy_fallback_for_every_completion():
+    original = _handler()
+    checked = []
+
+    def handler(request):
+        if request.url.path != "/health":
+            assert request.headers["X-OpenVidia-Strict-Model"] == "1"
+            checked.append(request)
+        return original(request)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://localhost:1919"
+    ) as client:
+        result = await soak.probe(client, "test/model", 2)
+    assert result["ok"] is True
+    assert len(checked) == 3
+
+
+@pytest.mark.asyncio
+async def test_probe_cancellation_does_not_become_failed_evidence():
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+
+    async def handler(request):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://localhost:1919"
+    ) as client:
+        task = asyncio.create_task(soak.probe(client, "test/model", 60))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert stopped.is_set()

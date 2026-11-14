@@ -436,3 +436,13 @@ header{display:flex;align-items:center;justify-content:space-between;padding:2px
 .browser-id{font-family:var(--mono);font-size:.56rem;color:var(--text3);overflow-wrap:anywhere}
 .browser-date,.browser-use-cases{font-size:.57rem;color:var(--text3);line-height:1.35;overflow-wrap:anywhere}
 .browser-item.unavailable .browser-info{opacity:.55}
+
+.model-guidance{font-size:.68rem;color:var(--text2);line-height:1.55;margin:0 0 10px}
+.model-guidance code{font-family:var(--mono);font-size:.64rem;overflow-wrap:anywhere}
+.validation-badge{font-size:.6rem;line-height:1.4;margin-top:2px;color:var(--text3)}
+.validation-badge.passed{color:var(--green)}
+.validation-badge.warn{color:var(--amber)}
+.validation-badge.failed{color:var(--red)}
+
+.browser-validate{font-family:var(--font);font-size:.57rem;line-height:1.4;border:1px solid var(--border);border-radius:4px;padding:3px 5px;background:var(--surface2);color:var(--text2);cursor:pointer;max-width:48px}
+.browser-validate:disabled{opacity:.5;cursor:wait}
