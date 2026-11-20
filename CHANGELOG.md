@@ -5,7 +5,7 @@ All notable changes to OpenVidia will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.3.0] - Unreleased
+## [2.3.0] - 2026-11-20
 
 ### Fixed
 - Prevent upstream hangs during tool loops on `mistralai/mistral-large-4-1t-a52b` by automatically omitting conflicting `tool_choice` on tool-result turns.
