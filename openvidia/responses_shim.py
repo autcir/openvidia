@@ -29,6 +29,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import config
 from ._upstream_utils import get_upstream_sem, is_resource_exhausted
+from .model_profiles import get_profile
 from .proxy_state import ProxyState
 
 # ── Bounded rotation + saturation fast-fail ─────────────────────────────
@@ -62,13 +63,49 @@ _KEEPALIVE_INTERVAL = 10.0
 _KEEPALIVE_BYTES = b": keepalive\n\n"
 
 
-async def _keepalive_until(task, result_box: list):
+def get_fallback_model(state: ProxyState, requested_model: str, validations=None) -> str | None:
+    """Find a fallback model:
+    1. First in starred presets (excluding requested_model, circuit not open)
+    2. Then in healthy models with passing tool validations from validations.load()
+    """
+    from .model_validation import ValidationStore
+
+    # 1. Starred presets
+    presets = config.load_saved_presets()
+    for m in presets:
+        if m != requested_model and not state.is_model_circuit_open(m):
+            return m
+
+    # 2. Healthy models with passing tool validations
+    store = validations if validations is not None else ValidationStore()
+    val_data = store.load()
+
+    # Prefer nvidia/nemotron-3-ultra-550b-a55b if present, passed and circuit closed
+    preferred = "nvidia/nemotron-3-ultra-550b-a55b"
+    if (
+        preferred != requested_model
+        and not state.is_model_circuit_open(preferred)
+        and val_data.get(preferred, {}).get("status") == "passed"
+    ):
+        return preferred
+
+    for m, row in val_data.items():
+        if (
+            m != requested_model
+            and not state.is_model_circuit_open(m)
+            and row.get("status") == "passed"
+        ):
+            return m
+
+    return None
+
+
+async def _keepalive_until(task, result_box: list, interval: float | None = None):
     """Yield keepalive comments until ``task`` finishes; append its result."""
+    timeout_s = interval if interval is not None else _KEEPALIVE_INTERVAL
     while True:
         try:
-            result_box.append(
-                await asyncio.wait_for(asyncio.shield(task), timeout=_KEEPALIVE_INTERVAL)
-            )
+            result_box.append(await asyncio.wait_for(asyncio.shield(task), timeout=timeout_s))
             return
         except TimeoutError:
             yield _KEEPALIVE_BYTES
@@ -229,6 +266,42 @@ async def _rotation_phase(
     exhausted_waits = 0
     network_errors = 0  # consecutive ConnectTimeout/ConnectError across keys
     _MAX_NETWORK_ERRORS = 3  # if 3+ keys fail to connect, the network is down
+
+    _model = payload.get("model", "") if isinstance(payload, dict) else ""
+    profile = get_profile(_model)
+    if isinstance(payload, dict):
+        payload = profile.normalize_payload(payload)
+        if content is not None:
+            try:
+                content = json.dumps(payload).encode()
+            except Exception:
+                pass
+
+    if isinstance(timeout, httpx.Timeout):
+        phase_timeout = httpx.Timeout(
+            connect=timeout.connect,
+            read=profile.read_timeout,
+            write=timeout.write,
+            pool=max(
+                timeout.pool if timeout.pool is not None else 0.0,
+                profile.read_timeout + (timeout.connect or 5.0),
+            ),
+        )
+    elif isinstance(timeout, (int, float)):
+        phase_timeout = httpx.Timeout(
+            connect=5.0,
+            read=profile.read_timeout,
+            write=30.0,
+            pool=profile.read_timeout + 60.0,
+        )
+    else:
+        phase_timeout = httpx.Timeout(
+            connect=5.0,
+            read=profile.read_timeout,
+            write=30.0,
+            pool=profile.read_timeout + 60.0,
+        )
+
     for pass_num in range(3):
         if pass_num > 0:
             await asyncio.sleep(1.0)
@@ -268,7 +341,7 @@ async def _rotation_phase(
             _model = payload.get("model", "") if isinstance(payload, dict) else ""
             _t0 = time.monotonic()
             # First attempt: probe timeout to detect dead models quickly.
-            _send_timeout = timeout
+            _send_timeout = phase_timeout
             if probe_timeout is not None and attempts == 1:
                 _send_timeout = probe_timeout
             try:
@@ -367,10 +440,56 @@ async def _rotation_phase(
             # instant 503, which reads as the model being dead when upstream was
             # merely busy.
             _exhausted = err_status in (429, 503) and is_resource_exhausted(error_body_bytes)
-            if not _exhausted:
+            if not _exhausted and err_status != 529:
                 state.record_model_result(_model, status=err_status)
                 state.record_key_model_result(k, _model, ok=False)
             _record(status=err_status, body=error_body, exhausted=_exhausted)
+
+            if err_status == 529:
+                _record(status=529, body=error_body, deterministic=False)
+                retried = False
+                for retry_529 in range(1, profile.max_529_retries + 1):
+                    state.log_cb(
+                        f"  {log_tag}: key[{idx}] HTTP 529 overload — pausing {profile.backoff_529_s}s "
+                        f"(retry {retry_529}/{profile.max_529_retries})"
+                    )
+                    await asyncio.sleep(profile.backoff_529_s)
+                    try:
+                        resp = await _send_once(
+                            client, method, upstream, payload, content, hdrs, _send_timeout, stream
+                        )
+                        if resp.status_code == 200 and prepare_response is not None:
+                            try:
+                                await prepare_response(resp)
+                            except BaseException:
+                                await resp.aclose()
+                                resp = None
+                                raise
+                    except httpx.HTTPError:
+                        break
+
+                    if resp.status_code == 200:
+                        state.record_model_result(_model, ok=True, ttft=time.monotonic() - _t0)
+                        state.record_key_model_result(
+                            k, _model, ok=True, ttft=time.monotonic() - _t0
+                        )
+                        return resp, k, idx
+
+                    err_status = resp.status_code
+                    try:
+                        error_body = await resp.aread()
+                        error_body_bytes = error_body
+                        error_body = error_body.decode("utf-8", errors="replace")[:500]
+                    except Exception:
+                        error_body_bytes = None
+                    await resp.aclose()
+                    if err_status != 529:
+                        retried = True
+                        break
+
+                if not retried and err_status == 529:
+                    state.log_cb(f"  {log_tag}: key[{idx}] HTTP 529 overload retries exhausted")
+                    continue
 
             # The request is wrong, not the key. Stop immediately and hand the
             # provider's own explanation back to the caller.
@@ -946,12 +1065,58 @@ async def _stream_responses(
                 outcome_box=_outcome,
             )
         )
-        # No deadline and no model substitution: the selected model is THE
-        # model. We wait for it (keepalives keep the stream alive meanwhile)
-        # and never silently answer from a different one.
-        async for _ka in _keepalive_until(_task, _box):
+        _req_model = chat_payload.get("model", "")
+        _profile = get_profile(_req_model)
+        async for _ka in _keepalive_until(_task, _box, interval=_profile.keepalive_interval_s):
             yield _ka
         resp, used_key, used_idx = _box[0]
+
+    if resp is None or used_key is None:
+        _fallback_allowed = (
+            not _outcome.get("deterministic")
+            and not state.is_pool_throttled()
+            and request.headers.get("X-OpenVidia-Strict-Model") != "1"
+        )
+        if _fallback_allowed:
+            _opts = config.model_options()
+            _fallback_mode = _opts.get("fallback", "off")
+            _req_model = chat_payload.get("model", "")
+            _per = (_opts.get("per_model") or {}).get(_req_model, {})
+            _fallback_mode = _per.get("fallback", _fallback_mode)
+            if _fallback_mode != "off":
+                fb_model = get_fallback_model(state, _req_model)
+                if fb_model:
+                    state.log_cb(
+                        f"🔴 rotation failed for {_req_model} → auto-failover to {fb_model}"
+                    )
+                    chat_payload["model"] = fb_model
+                    config.apply_model_options(chat_payload)
+                    async with state.lock:
+                        fb_candidates = state.get_candidate_keys(fb_model)
+                    if fb_candidates:
+                        _fb_box: list = []
+                        _fb_profile = get_profile(fb_model)
+                        _fb_task = asyncio.ensure_future(
+                            _rotation_phase(
+                                client,
+                                upstream,
+                                chat_payload,
+                                json_headers,
+                                state,
+                                fb_candidates,
+                                max_attempts=_MAX_ROTATE_ATTEMPTS,
+                                timeout=_ROTATE_SEND_TIMEOUT,
+                                stream=True,
+                                log_tag="responses shim",
+                                outcome_box=_outcome,
+                            )
+                        )
+                        async for _ka in _keepalive_until(
+                            _fb_task, _fb_box, interval=_fb_profile.keepalive_interval_s
+                        ):
+                            yield _ka
+                        if _fb_box:
+                            resp, used_key, used_idx = _fb_box[0]
 
     if resp is None or used_key is None:
         # Definitive failure: emit error + response.failed and terminate.
@@ -1073,10 +1238,28 @@ async def _stream_responses(
     final_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
     try:
-        async for line in resp.aiter_lines():
+        # While waiting for first byte from upstream, send SSE comment heartbeat
+        async def _aiter_lines_keepalive(response, interval):
+            aiter = response.aiter_lines().__aiter__()
+            got_first = False
+            while True:
+                try:
+                    line = await asyncio.wait_for(aiter.__anext__(), timeout=interval)
+                    got_first = True
+                    yield line
+                except TimeoutError:
+                    if not got_first:
+                        yield ": keepalive"
+                except StopAsyncIteration:
+                    break
+
+        _ka_int = _profile.keepalive_interval_s if "_profile" in locals() else _KEEPALIVE_INTERVAL
+        async for line in _aiter_lines_keepalive(resp, _ka_int):
             if await request.is_disconnected():
                 break
             if not line or not line.startswith("data: "):
+                if line.startswith(":"):
+                    yield f"{line}\n\n".encode()
                 continue
             data_str = line[6:]
             if data_str.strip() == "[DONE]":
@@ -1282,11 +1465,7 @@ async def handle_responses(
                 {"error": f"{_req_model} is down (circuit open), fallback disabled"},
                 status_code=503,
             )
-        _presets = config.load_saved_presets()
-        _fallback = next(
-            (m for m in _presets if m != _req_model and not state.is_model_circuit_open(m)),
-            None,
-        )
+        _fallback = get_fallback_model(state, _req_model)
         if _fallback:
             state.log_cb(f"🔴 {_req_model} circuit OPEN → auto-failover to {_fallback}")
             chat_payload["model"] = _fallback

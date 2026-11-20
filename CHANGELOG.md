@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.3.0] - Unreleased
 
 ### Fixed
+- Prevent upstream hangs during tool loops on `mistralai/mistral-large-4-1t-a52b` by automatically omitting conflicting `tool_choice` on tool-result turns.
+- Prevent agent socket drops during long Time-To-First-Token reasoning phases (e.g. `moonshotai/kimi-k3.1-pro`) via periodic SSE `: keepalive\n\n` comments and extended read timeouts.
+- Treat HTTP 529 (*Service temporarily overloaded*) as transient cluster saturation: retry with brief backoff without penalizing keys with 30s cooldowns or opening circuit breakers.
+- Eliminate HTTP 503 agent interruptions through multi-tier fallback: automatically route around circuit-open or failing models to user Starred presets or verified healthy models (e.g. `nvidia/nemotron-3-ultra-550b-a55b`).
 - Prevent dashboard availability checks from crashing on null/reasoning-only responses; use the configured proxy path and a bounded deadline.
 - Keep metadata probes from clearing inference cooldowns, including failures arriving during a probe.
 - Reject malformed validation responses and prevent fallback models from receiving another model’s validation evidence.
@@ -24,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Write configuration on platforms without Unix fchmod.
 
 ### Added
+- Dynamic Model Profiles (`model_profiles.py`) with hierarchical matching for NVIDIA model families (`mistralai/*`, `moonshotai/*`, `minimaxai/*`, `nvidia/*`), per-model timeouts, and automatic payload normalization.
 - Opt-in streaming/tool-result model validator with sanitized identity evidence, plus dated API and real OpenCode integration reports.
 - Default Tested tools filter with expiring local streaming/tool evidence, authenticated Check tools action, and separately attested OpenCode badges.
 - Recent model picker using official Build modification dates and exact inference API intersections; preserve the complete catalog under All.

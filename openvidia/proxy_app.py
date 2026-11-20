@@ -850,12 +850,10 @@ def create_app(state: ProxyState, web_dir: Path | None = None) -> FastAPI:
                     {"error": f"{requested_model} is down (circuit open), fallback disabled"},
                     status_code=503,
                 )
-            # Try to failover to the next working preset
-            presets = config.load_saved_presets()
-            fallback = next(
-                (m for m in presets if m != requested_model and not state.is_model_circuit_open(m)),
-                None,
-            )
+            # Try to failover to the next working preset or healthy validated model
+            from .responses_shim import get_fallback_model
+
+            fallback = get_fallback_model(state, requested_model, validations)
             if fallback and isinstance(payload, dict):
                 state.log_cb(f"🔴 {requested_model} circuit OPEN → auto-failover to {fallback}")
                 payload["model"] = fallback

@@ -8,17 +8,17 @@
 ![Last Commit](https://img.shields.io/github/last-commit/autcir/openvidia)
 [![Release](https://img.shields.io/github/v/release/autcir/openvidia)](https://github.com/autcir/openvidia/releases)
 
-**Multi-key proxy for NVIDIA NIM with a native desktop dashboard.**
+**Multi-key proxy for NVIDIA NIM with dynamic model adaptation, resilient multi-tier fallback, and a native desktop dashboard.**
 
 <p align="center">
   <img src="openvidia/web/assets/dashboard.gif" alt="OpenVidia dashboard — pooled keys, ★ Starred model shortlist, live activity log" width="400">
 </p>
 
-Pool multiple free-tier API keys behind one endpoint. Automatic rotation, per-key cooldown, sliding-window RPM limiting, and a compact desktop app — no browser needed.
+Pool multiple free-tier API keys behind one endpoint. Automatic rotation, per-key cooldown, sliding-window RPM limiting, dynamic per-model adaptation, and a compact desktop app — no browser needed.
 
 Built for [opencode](https://opencode.ai), [Codex CLI](https://github.com/openai/codex), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Grok](https://x.ai), [Jcode](https://github.com/1jehuang/jcode), and any OpenAI-compatible client.
 
-**Live evidence (13 Nov 2026):** three recent models completed real OpenCode file-tool tests; four of six API protocol cycles passed, with documented timeouts and a returned-model identity caveat. See the [dated validation report](docs/validation-results/2026-11-13.md) and [reproducible opt-in validator](docs/validation.md). The 72-hour run is still in progress.
+**Live evidence:** recent models (`nvidia/nemotron-3-ultra-550b-a55b`, `mistralai/mistral-large-4-1t-a52b`, `stepfun-ai/step-5-preview`) complete real streaming, tool-calling and tool-result cycles through the proxy. See the [dated validation reports](docs/validation-results/2026-11-14.md) and [reproducible opt-in validator](docs/validation.md).
 
 ---
 
@@ -95,18 +95,22 @@ openvidia
 │  ┌─────────────────────────────────────────────────────┐    │
 │  │               Proxy Engine (:1919/v1)               │    │
 │  │                                                     │    │
-│  │  Request → override model → pick key → forward      │    │
+│  │  Request → Model Profiles → pick key → forward      │    │
+│  │            (normalize payload,                      │    │
+│  │             per-model timeouts)                     │    │
 │  │            ↑                ↑           ↑           │    │
 │  │            │            cooldown?   RPM < 28?       │    │
 │  │            │            skip if yes  skip if no     │    │
 │  │            │                                        │    │
 │  │  On 429: read Retry-After → set cooldown → next key │    │
+│  │  On 529: cluster overload → backoff & retry 3×      │    │
 │  │  On 401/403: cooldown 3600s (dead key)              │    │
 │  │  On 400/404: cooldown 60s (deterministic)           │    │
 │  │  On 504: cooldown 30s (model bottleneck, not key)   │    │
 │  │  On 5xx: cooldown 10s (gateway) / 30s (other)       │    │
 │  │  On network error: no cooldown, 0.5s pause          │    │
 │  │  3 consecutive network errors → stop (network down) │    │
+│  │  Circuit open? → smart fallback to Starred/Healthy  │    │
 │  └─────────────────────────────────────────────────────┘    │
 │                          │                                  │
 │                   NVIDIA NIM API                            │
@@ -122,12 +126,15 @@ NVIDIA rate limits and shared worker availability vary by model and account. Bur
 
 - **Pools multiple keys** behind a single endpoint
 - **Rotates automatically** on eligible key/provider errors, with bounded attempts and explicit failure when the pool cannot serve the request
+- **Per-model dynamic adaptation** (`openvidia/model_profiles.py`) — hierarchical rules by model family (`mistralai/*`, `moonshotai/*`, `minimaxai/*`, `nvidia/*`) with per-model read timeouts (up to 180s for slow reasoning models like Kimi) and keep-alive SSE comments (`: keepalive\n\n`) to prevent client disconnection during long TTFT
+- **Payload normalization** — automatically cleans up provider-specific quirks (e.g. omitting conflicting `tool_choice` on tool-result turns for Mistral Large 4) to ensure coding agents complete tool loops without upstream hangs
+- **Transient 529 overload handling** — treats HTTP 529 (*Service temporarily overloaded*) as transient upstream cluster saturation, retrying with brief backoff without penalizing keys or tripping circuits prematurely
+- **Resilient multi-tier fallback** — when a requested model is circuit-open or failing, automatically falls back to Starred presets, then to verified healthy models (e.g. `nvidia/nemotron-3-ultra-550b-a55b`), preventing HTTP 503 agent interruptions
 - **Per-key cooldown timers** — on real 429s, trusts `Retry-After` exactly (no multiplication); distinguishes transient worker saturation (`ResourceExhausted`) from true RPM limits and never burns key cooldowns for the former
 - **Network-error circuit breaker** — `ConnectTimeout`/`ConnectError` don't trigger key cooldown (the key is fine). After 3 consecutive network errors across different keys, rotation stops entirely and returns 503 (the network is down, no key can help)
 - **Bounded gateway retries** — gateway failures cool the key for 30s and spend the attempt budget so a large pool cannot amplify an outage indefinitely
 - **Sliding-window RPM limiting** — starts with a 28 RPM per-key ceiling and adapts downward from `Retry-After`; account-level throttling still takes precedence
 - **Health checks** — revives keys whose cooldowns have expired, but skips 401/403 invalid keys (dead keys stay dead)
-- **Explicit routing policy** — the requested model is forwarded to NVIDIA; model/provider failover requires explicit configuration. Provider-reported model identity can differ and is recorded separately by the live validator.
 - **Auto-compaction** — summarizes or trims long histories to reduce context-overflow failures ([details](#auto-compaction))
 - **Per-key × per-model scoring** — rotation is ordered by a composite score (success rate + median time to first token) learned per key and per model from live traffic: the best key for the requested model goes first
 - **Multi-endpoint routing** — extra NVIDIA endpoints (`endpoints.json` or `OPENVIDIA_UPSTREAM_ENDPOINTS`), a 60s blacklist on eligible endpoint errors (model-specific 504 timeouts do not blacklist the shared host), automatic recovery
@@ -143,6 +150,10 @@ NVIDIA rate limits and shared worker availability vary by model and account. Bur
 | Command | Description |
 |---------|-------------|
 | `openvidia` | Start proxy in background + open desktop app |
+| `openvidia foreground` | Foreground mode (logs to stdout, no UI) |
+| `openvidia setup` | Configure opencode and Jcode (backs up config first) |
+| `openvidia run <cli> [args]` | Run any CLI against the proxy for one process without modifying configuration files |
+| `openvidia update <action>` | Check, install, or roll back verified release updates (`check`, `install`, `rollback`) |
 | `openvidia foreground` | Foreground mode (logs to stdout, no UI) |
 | `openvidia setup` | Configure opencode and Jcode; other clients use `openvidia run <cli>` |
 
@@ -327,6 +338,7 @@ Streaming (SSE) responses flow incrementally; model and client protocol capabili
 |-------------|----------|---------|
 | **429** (real RPM limit) | `Retry-After` header (trusted as-is, no multiplication), or 45s + jitter | Rate limited — honour NVIDIA's own window exactly |
 | **429** (worker concurrency) | 0 — retried after 0.8s pause | `ResourceExhausted: Worker local total request limit reached` — transient pool saturation, key is healthy |
+| **529** (service overloaded) | 0 — retried up to 3× (1.5s backoff) | Transient upstream cluster saturation — key untouched, immediate short retry |
 | **401 / 403** | 3600s | Dead key — don't waste requests |
 | **400 / 404** | 60s | Deterministic request error — short cooldown, key untouched for rotation. Every key gets the same error, so rotating only burns cooldown budget. |
 | **504** (gateway timeout) | 30s | Model is the bottleneck, not the key — longer cooldown, but doesn't burn the attempt budget |
@@ -478,7 +490,7 @@ update-desktop-database ~/.local/share/applications/
 | **Status** | Proxy state, active model, start/stop/restart controls |
 | **Stats** | Request count, success rate, rotations, cooldown counter |
 | **Keys** | Per-key status (Active filter default), live cooldown countdown, RPM, success/fail, freshness dots, add/remove/copy |
-| **Models** | Single list — filters: **★ Starred** (default; your quick-switch shortlist) · All · Popular. Search, test ▶, star/unstar. Active model highlighted and pinned to top. |
+| **Models** | Single list — filters: **Tested tools** (default; models with fresh streaming and tool roundtrip proof) · **Recent** (official Build modification dates) · **★ Favorites** · **All**. Search, **Check tools** (authenticated protocol verification), availability check ▶, favorite/unfavorite. Active model highlighted and pinned to top. |
 | **Thinking** | `auto` / `on` / `off` next to the active model — a hybrid reasoning model emits nothing while it thinks |
 | **Activity** | Real-time SSE log stream with color-coded levels |
 | **CLI Setup** | Copy-paste config for opencode / Codex / Claude / Grok |
@@ -516,7 +528,9 @@ update-desktop-database ~/.local/share/applications/
 | `compaction.json` | Auto-compaction tuning (optional — see [Auto-Compaction](#auto-compaction)) |
 | `timeouts.json` | Upstream timeouts (optional — see [Slow models](#slow-models)) |
 | `model_limits.json` | Context windows the proxy learned by itself — never edit by hand |
+| `model-validation.json` | Local, expiring tool-check verification evidence (stream, tool_call, tool_result) |
 | `model_options.json` | Reasoning toggle + the payload used to express it (see [Thinking](#thinking-reasoning-toggle)) |
+| `build-catalog.json` | Cached NVIDIA Build catalog metadata (TTL 1h) |
 | `endpoints.json` | Extra NVIDIA upstream endpoints (optional — see [Resilience & Scale](#resilience--scale)) |
 | `redis_config.json` | Redis URL for multi-node sync (optional — `OPENVIDIA_REDIS_URL` also works) |
 | `providers.json` | Free-tier fallback providers (optional — name, base URL, env var for the key, model map) |
@@ -591,29 +605,26 @@ provider retires it, and it silently overrides what you picked.
 
 ---
 
-### Slow models
+### Dynamic Model Profiles & Slow Models
 
-A `read` timeout is the wait for the **first byte**, and a reasoning model
-emits nothing at all while it thinks. Measured on the NVIDIA free tier in
-July 2026, the same key, within the same minute (these models have since been
-retired; the pattern still holds for their successors):
+A `read` timeout is the wait for the **first byte** (Time To First Token), and high-capacity or reasoning models emit nothing at all while processing. Upstream latency varies widely across providers on NVIDIA NIM:
 
-| Model | Time to first token |
-|-------|---------------------|
-| `deepseek-ai/deepseek-v4-flash` | 2.1s |
-| `deepseek-ai/deepseek-v4-pro` | 12.3s |
-| `minimaxai/minimax-m3` | 44.5s |
-| `z-ai/glm-5.2` | 2–4s (thinking=off) / 162s (thinking=on) |
+| Model | Observed Time to First Token | Built-in Profile Policy |
+|-------|------------------------------|-------------------------|
+| `nvidia/nemotron-3-ultra-550b-a55b` | ~0.5s | 45s timeout, fast tool calling |
+| `nvidia/nemotron-3.5-super-vl-120b-a12b` | ~0.4s | 45s timeout, vision + tools |
+| `stepfun-ai/step-5-preview` | ~0.8s | 60s timeout, passed tool validation |
+| `mistralai/mistral-large-4-1t-a52b` | ~7s | 90s timeout, tool-choice payload normalization |
+| `moonshotai/kimi-k3.1-pro` | 50s–90s+ | 180s extended timeout + SSE `: keepalive\n\n` comments |
+| `minimaxai/minimax-m3.1-flash` | ~2s (subject to 529 spikes) | 60s timeout, 3× transient 529 overload retry with backoff |
 
-Provider capacity for one model can collapse without warning while the others
-stay fast — so a timeout short enough to feel responsive is also short enough
-to make a slow model **fail on every key in the pool**. OpenVidia therefore
-waits (default 240s) and keeps the SSE stream alive with periodic comments, so
-your CLI can tell "thinking" from "dead". A read timeout never puts a key on
-cooldown: the key connected fine and the upstream accepted the request — it is
-the model that is slow, and cooling keys down for it drains the whole pool.
+Instead of a fragile global timeout, OpenVidia uses **Dynamic Model Profiles** (`openvidia/model_profiles.py`):
+1. **Hierarchical Matching:** Rules match namespace wildcards (`mistralai/*`, `moonshotai/*`, `minimaxai/*`, `nvidia/*`, etc.) with specific model overrides, so new models inherit the right policies immediately.
+2. **Payload Normalization:** Upstream quirks are sanitized automatically (e.g. omitting conflicting `tool_choice` on tool-result turns for Mistral Large 4 to prevent upstream hangs).
+3. **SSE Keepalive Comments:** When waiting for slow initial tokens, OpenVidia emits periodic `: keepalive\n\n` comments so downstream coding agents (OpenCode, Codex, Claude Code) do not drop the socket.
+4. **Resilient Multi-Tier Fallback:** If a model's circuit trips open, OpenVidia fails over to your Starred favorites, then to verified healthy models, avoiding HTTP 503 agent crashes.
 
-Override in `~/.config/openvidia/timeouts.json`:
+Global default overrides can still be set in `~/.config/openvidia/timeouts.json`:
 
 ```json
 { "connect": 5.0, "read": 240.0, "write": 30.0, "pool": 240.0 }
@@ -759,7 +770,7 @@ scale across machines.
       "name": "glm",
       "base_url": "https://api.example.com/v1",
       "api_key_env": "GLM_API_KEY",
-      "models": { "deepseek-ai/deepseek-v4-flash": "glm-5" }
+      "models": { "moonshotai/kimi-k3.1-pro": "deepseek-chat" }
     }
   ]
   ```

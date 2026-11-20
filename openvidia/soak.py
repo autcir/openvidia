@@ -20,6 +20,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from .model_profiles import get_profile
+
 
 class ProbeError(Exception):
     """A completion violated a contract; reasons are a fixed safe vocabulary."""
@@ -118,21 +120,25 @@ async def probe(client: httpx.AsyncClient, model: str, timeout: float) -> dict:
             if _response_object(response).get("service") != "openvidia":
                 raise ProbeError("health_identity")
             results["health"] = True
+            profile = get_profile(model)
             probe_headers = {"X-OpenVidia-Strict-Model": "1"}
             common = {
                 "model": model,
                 "max_tokens": 128,
                 "chat_template_kwargs": {"enable_thinking": False},
             }
+            stream_payload = profile.normalize_payload(
+                {
+                    **common,
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "Reply exactly SOAK_OK."}],
+                }
+            )
             async with client.stream(
                 "POST",
                 "/v1/chat/completions",
                 headers=probe_headers,
-                json={
-                    **common,
-                    "stream": True,
-                    "messages": [{"role": "user", "content": "Reply exactly SOAK_OK."}],
-                },
+                json=stream_payload,
             ) as response:
                 response.raise_for_status()
                 _require_direct_model(response)
@@ -188,10 +194,13 @@ async def probe(client: httpx.AsyncClient, model: str, timeout: float) -> dict:
                     },
                 }
             ]
+            tool_call_payload = profile.normalize_payload(
+                {**common, "messages": messages, "tools": tools, "tool_choice": "required"}
+            )
             response = await client.post(
                 "/v1/chat/completions",
                 headers=probe_headers,
-                json={**common, "messages": messages, "tools": tools, "tool_choice": "required"},
+                json=tool_call_payload,
             )
             response.raise_for_status()
             message = _response_message(response)
@@ -231,10 +240,13 @@ async def probe(client: httpx.AsyncClient, model: str, timeout: float) -> dict:
                 {"role": "tool", "tool_call_id": call["id"], "content": "SOAK_TOOL_OK"}
                 for call in calls
             )
+            tool_result_payload = profile.normalize_payload(
+                {**common, "messages": messages, "tools": tools, "tool_choice": "none"}
+            )
             response = await client.post(
                 "/v1/chat/completions",
                 headers=probe_headers,
-                json={**common, "messages": messages, "tools": tools, "tool_choice": "none"},
+                json=tool_result_payload,
             )
             response.raise_for_status()
             if (_response_message(response).get("content") or "").strip() != "SOAK_TOOL_OK":
