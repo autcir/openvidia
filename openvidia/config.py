@@ -147,14 +147,7 @@ _MODEL_OPTIONS_DEFAULTS = {
     # Key insight:
     #   Nemotron Ultra:  enable_thinking=False mandatory for tool calling;
     #                    temperature=1.0, top_p=0.95 per NVIDIA best practice
-    #   DeepSeek V4.1 Flash: temperature=1.0, top_p=0.95 per its model card
     "per_model": {
-        "deepseek-ai/deepseek-v4.1-flash": {
-            "extra_payload": {
-                "temperature": 1.0,
-                "top_p": 0.95,
-            },
-        },
         "nvidia/nemotron-3-ultra-550b-a55b": {
             "thinking": "off",
             # temperature=1.0, top_p=0.95: NVIDIA recommended for Nemotron reasoning modes
